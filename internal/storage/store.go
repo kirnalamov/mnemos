@@ -1,16 +1,25 @@
 package storage
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 )
 
 var ErrStoreClosed = errors.New("storage is closed")
+var ErrNotFound = errors.New("object not found")
+
+type Entry struct {
+	Offset int64
+	Size   int
+}
 
 type Store struct {
 	mu     sync.Mutex
 	file   *os.File
+	index  map[string]Entry
 	closed bool
 }
 
@@ -24,9 +33,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{
-		file: file,
-	}, nil
+	store := &Store{
+		file:  file,
+		index: make(map[string]Entry),
+	}
+
+	if err := store.rebuildIndex(); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("rebuild storage index: %w", err)
+	}
+
+	return store, nil
 }
 
 func (s *Store) Put(key string, data []byte) error {
@@ -45,8 +62,25 @@ func (s *Store) Put(key string, data []byte) error {
 		return err
 	}
 
-	_, err = s.file.Write(encoded)
-	return err
+	offset, err := s.file.Seek(0, os.SEEK_END)
+	if err != nil {
+		return err
+	}
+
+	n, err := s.file.Write(encoded)
+	if err != nil {
+		return err
+	}
+	if n != len(encoded) {
+		return errors.New("incomplete record write")
+	}
+
+	s.index[key] = Entry{
+		Offset: offset,
+		Size:   len(encoded),
+	}
+
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -59,4 +93,106 @@ func (s *Store) Close() error {
 
 	s.closed = true
 	return s.file.Close()
+}
+
+func (s *Store) Get(key string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil, ErrStoreClosed
+	}
+
+	entry, ok := s.index[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	encoded := make([]byte, entry.Size)
+
+	_, err := s.file.ReadAt(encoded, entry.Offset)
+	if err != nil {
+		return nil, err
+	}
+
+	record, err := Decode(encoded)
+	if err != nil {
+		return nil, err
+	}
+
+	return record.Data, nil
+}
+func (s *Store) rebuildIndex() error {
+	info, err := s.file.Stat()
+	if err != nil {
+		return err
+	}
+
+	fileSize := info.Size()
+	var offset int64
+
+	for offset < fileSize {
+		if fileSize-offset < int64(headerSize) {
+			return fmt.Errorf(
+				"truncated record header at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
+		}
+
+		header := make([]byte, headerSize)
+		if _, err := s.file.ReadAt(header, offset); err != nil {
+			return err
+		}
+
+		gotMagic := binary.BigEndian.Uint32(header[0:4])
+		gotVersion := binary.BigEndian.Uint16(header[4:6])
+		keySize := binary.BigEndian.Uint32(header[6:10])
+		dataSize := binary.BigEndian.Uint64(header[10:18])
+
+		if gotMagic != magic || gotVersion != version {
+			return fmt.Errorf(
+				"invalid record header at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
+		}
+
+		if keySize == 0 || keySize > maxKeySize || dataSize > maxDataSize {
+			return fmt.Errorf(
+				"invalid record size at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
+		}
+
+		recordSize := int64(headerSize) + int64(keySize) + int64(dataSize)
+
+		if recordSize > fileSize-offset {
+			return fmt.Errorf(
+				"truncated record at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
+		}
+
+		encoded := make([]byte, int(recordSize))
+		if _, err := s.file.ReadAt(encoded, offset); err != nil {
+			return err
+		}
+
+		record, err := Decode(encoded)
+		if err != nil {
+			return fmt.Errorf("decode record at offset %d: %w", offset, err)
+		}
+
+		s.index[record.Key] = Entry{
+			Offset: offset,
+			Size:   int(recordSize),
+		}
+
+		offset += recordSize
+	}
+
+	return nil
 }
