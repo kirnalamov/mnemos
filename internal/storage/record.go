@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	magic      uint32 = 0x4D4E4D53 // "MNMS"
-	version    uint16 = 1
-	headerSize        = 22
-	maxKeySize        = 1 << 20 // 1 MiB
+	magic       uint32 = 0x4D4E4D53 // "MNMS"
+	version     uint16 = 1
+	headerSize         = 22
+	maxKeySize         = 1 << 20  // 1 MiB
+	maxDataSize uint64 = 64 << 20 // 64 MiB
 )
 
 var (
@@ -29,7 +30,9 @@ func Encode(r Record) ([]byte, error) {
 	if len(r.Key) == 0 || len(r.Key) > maxKeySize {
 		return nil, ErrInvalidRecord
 	}
-
+	if uint64(len(r.Data)) > maxDataSize {
+		return nil, ErrInvalidRecord
+	}
 	var buf bytes.Buffer
 
 	if err := binary.Write(&buf, binary.BigEndian, magic); err != nil {
@@ -94,8 +97,17 @@ func Decode(src []byte) (Record, error) {
 		return r, ErrInvalidRecord
 	}
 
-	payloadSize := uint64(keySize) + dataSize
-	if payloadSize != uint64(reader.Len()) {
+	if dataSize > maxDataSize {
+		return r, ErrInvalidRecord
+	}
+
+	remaining := uint64(reader.Len())
+
+	if dataSize > remaining {
+		return r, ErrInvalidRecord
+	}
+
+	if uint64(keySize) != remaining-dataSize {
 		return r, ErrInvalidRecord
 	}
 

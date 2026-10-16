@@ -1,8 +1,8 @@
-
 package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -51,6 +51,23 @@ func TestDecodeDetectsCorruption(t *testing.T) {
 
 func TestDecodeRejectsTruncatedRecord(t *testing.T) {
 	_, err := Decode([]byte{1, 2, 3})
+	if !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("got error %v, want ErrInvalidRecord", err)
+	}
+}
+func TestDecodeRejectsOversizedData(t *testing.T) {
+	encoded, err := Encode(Record{
+		Key:  "test",
+		Data: []byte("small data"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// dataSize находится в байтах 10–17 заголовка.
+	binary.BigEndian.PutUint64(encoded[10:18], maxDataSize+1)
+
+	_, err = Decode(encoded)
 	if !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("got error %v, want ErrInvalidRecord", err)
 	}
