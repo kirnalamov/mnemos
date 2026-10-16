@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -70,5 +72,65 @@ func TestDecodeRejectsOversizedData(t *testing.T) {
 	_, err = Decode(encoded)
 	if !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("got error %v, want ErrInvalidRecord", err)
+	}
+}
+
+func TestStoreOperationsAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/test.txt", []byte("data")); !errors.Is(err, ErrStoreClosed) {
+		t.Errorf("Put error: got %v, want %v", err, ErrStoreClosed)
+	}
+
+	if _, err := store.Get("notes/test.txt"); !errors.Is(err, ErrStoreClosed) {
+		t.Errorf("Get error: got %v, want %v", err, ErrStoreClosed)
+	}
+
+}
+
+func TestOpenRejectsCorruptedRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/test.txt", []byte("valid data")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Повреждаем первый байт сигнатуры записи.
+	if _, err := file.WriteAt([]byte{0x00}, 0); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err == nil {
+		store.Close()
+		t.Fatal("expected Open to reject corrupted record")
 	}
 }
