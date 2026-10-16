@@ -23,6 +23,31 @@ type Store struct {
 	closed bool
 }
 
+type recordWriter interface {
+	Write([]byte) (int, error)
+	Truncate(int64) error
+}
+
+func writeRecord(w recordWriter, offset int64, encoded []byte) error {
+	n, err := w.Write(encoded)
+
+	if err == nil && n == len(encoded) {
+		return nil
+	}
+
+	if err == nil {
+		err = errors.New("incomplete record write")
+	}
+
+	if truncateErr := w.Truncate(offset); truncateErr != nil {
+		return errors.Join(
+			fmt.Errorf("write record: %w", err),
+			fmt.Errorf("rollback incomplete write: %w", truncateErr),
+		)
+	}
+
+	return fmt.Errorf("write record: %w", err)
+}
 func Open(path string) (*Store, error) {
 	file, err := os.OpenFile(
 		path,
@@ -67,12 +92,8 @@ func (s *Store) Put(key string, data []byte) error {
 		return err
 	}
 
-	n, err := s.file.Write(encoded)
-	if err != nil {
+	if err := writeRecord(s.file, offset, encoded); err != nil {
 		return err
-	}
-	if n != len(encoded) {
-		return errors.New("incomplete record write")
 	}
 
 	s.index[key] = Entry{
@@ -133,11 +154,7 @@ func (s *Store) rebuildIndex() error {
 
 	for offset < fileSize {
 		if fileSize-offset < int64(headerSize) {
-			return fmt.Errorf(
-				"truncated record header at offset %d: %w",
-				offset,
-				ErrInvalidRecord,
-			)
+			return s.file.Truncate(offset)
 		}
 
 		header := make([]byte, headerSize)
@@ -169,11 +186,7 @@ func (s *Store) rebuildIndex() error {
 		recordSize := int64(headerSize) + int64(keySize) + int64(dataSize)
 
 		if recordSize > fileSize-offset {
-			return fmt.Errorf(
-				"truncated record at offset %d: %w",
-				offset,
-				ErrInvalidRecord,
-			)
+			return s.file.Truncate(offset)
 		}
 
 		encoded := make([]byte, int(recordSize))

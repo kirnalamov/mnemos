@@ -134,3 +134,131 @@ func TestOpenRejectsCorruptedRecord(t *testing.T) {
 		t.Fatal("expected Open to reject corrupted record")
 	}
 }
+
+func TestOpenTruncatesIncompleteTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := "notes/safe.txt"
+	data := []byte("valid data")
+
+	if err := store.Put(key, data); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Имитируем аварийное завершение посередине второй записи.
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partial, err := Encode(Record{
+		Key:  "notes/incomplete.txt",
+		Data: []byte("incomplete data"),
+	})
+	if err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+
+	if _, err := file.Write(partial[:len(partial)/2]); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open should recover incomplete tail: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get existing record: %v", err)
+	}
+
+	if string(got) != string(data) {
+		t.Fatalf("data: got %q, want %q", got, data)
+	}
+
+	_, err = store.Get("notes/incomplete.txt")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("incomplete key error: got %v, want %v", err, ErrNotFound)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedSize := int64(headerSize + len(key) + len(data))
+	if info.Size() != expectedSize {
+		t.Fatalf("file size: got %d, want %d", info.Size(), expectedSize)
+	}
+
+}
+
+func TestOpenRejectsCorruptedRecordWithoutTruncating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/first.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("notes/second.txt", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSize := before.Size()
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Повреждаем сигнатуру первой записи.
+	if _, err := file.WriteAt([]byte{0x00}, 0); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path)
+	if err == nil {
+		t.Fatal("expected Open to reject corrupted record")
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if after.Size() != originalSize {
+		t.Fatalf("file size changed: got %d, want %d", after.Size(), originalSize)
+	}
+}
