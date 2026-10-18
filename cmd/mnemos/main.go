@@ -78,6 +78,12 @@ func run(args []string) (retErr error) {
 			return fmt.Errorf("delete: %w", err)
 		}
 		fmt.Println("OK")
+
+	case "compact":
+		if err := e.Compact(); err != nil {
+			return fmt.Errorf("compact: %w", err)
+		}
+		fmt.Println("OK")
 	}
 
 	return nil
@@ -97,6 +103,10 @@ func validateArgs(args []string) error {
 		if len(args) != 2 {
 			return errors.New("usage: mnemos delete <key>")
 		}
+	case "compact":
+		if len(args) != 1 {
+			return errors.New("usage: mnemos compact")
+		}
 	default:
 		return fmt.Errorf("unknown command %q; run 'mnemos help' for usage", args[0])
 	}
@@ -111,5 +121,7 @@ Usage:
   mnemos put <key> <value>   Store a value
   mnemos get <key>           Read a value
   mnemos delete <key>        Delete a key
+  mnemos compact             Reclaim historical records
   mnemos help                Show this help`)
+
 }
