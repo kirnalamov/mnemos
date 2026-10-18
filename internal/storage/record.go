@@ -12,12 +12,14 @@ const (
 	magic        uint32 = 0x4D4E4D53 // "MNMS"
 	versionV1    uint16 = 1
 	versionV2    uint16 = 2
+	versionV3    uint16 = 3
 	headerSizeV1        = 22
 	headerSizeV2        = 23
+	headerSizeV3        = 23
 	maxKeySize          = 1 << 20  // 1 MiB
 	maxDataSize  uint64 = 64 << 20 // 64 MiB
-	version      uint16 = versionV1
-	headerSize          = headerSizeV1
+	version      uint16 = versionV3
+	headerSize          = headerSizeV3
 )
 
 type RecordType uint8
@@ -36,6 +38,13 @@ type Record struct {
 	Type RecordType
 	Key  string
 	Data []byte
+}
+
+func checksumV3(encoded []byte) uint32 {
+	hash := crc32.NewIEEE()
+	_, _ = hash.Write(encoded[6:19])
+	_, _ = hash.Write(encoded[headerSizeV3:])
+	return hash.Sum32()
 }
 
 func Encode(r Record) ([]byte, error) {
@@ -57,7 +66,7 @@ func Encode(r Record) ([]byte, error) {
 	if err := binary.Write(&buf, binary.BigEndian, magic); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(&buf, binary.BigEndian, versionV2); err != nil {
+	if err := binary.Write(&buf, binary.BigEndian, versionV3); err != nil {
 		return nil, err
 	}
 	if err := buf.WriteByte(byte(r.Type)); err != nil {
@@ -70,15 +79,18 @@ func Encode(r Record) ([]byte, error) {
 		return nil, err
 	}
 
-	checksum := crc32.ChecksumIEEE(r.Data)
-	if err := binary.Write(&buf, binary.BigEndian, checksum); err != nil {
+	// Reserve the checksum field; fill it after appending key and data.
+	if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
 		return nil, err
 	}
 
 	buf.WriteString(r.Key)
 	buf.Write(r.Data)
 
-	return buf.Bytes(), nil
+	encoded := buf.Bytes()
+	binary.BigEndian.PutUint32(encoded[19:23], checksumV3(encoded))
+
+	return encoded, nil
 }
 
 func Decode(src []byte) (Record, error) {
@@ -106,7 +118,7 @@ func Decode(src []byte) (Record, error) {
 	switch gotVersion {
 	case versionV1:
 		r.Type = RecordPut
-	case versionV2:
+	case versionV2, versionV3:
 		if len(src) < headerSizeV2 {
 			return r, ErrInvalidRecord
 		}
@@ -158,8 +170,17 @@ func Decode(src []byte) (Record, error) {
 		return r, ErrInvalidRecord
 	}
 
-	if crc32.ChecksumIEEE(data) != checksum {
-		return r, ErrChecksum
+	switch gotVersion {
+	case versionV1, versionV2:
+		// Legacy formats protect only the data payload.
+		if crc32.ChecksumIEEE(data) != checksum {
+			return r, ErrChecksum
+		}
+	case versionV3:
+		// V3 protects record type, lengths, key and data.
+		if checksumV3(src) != checksum {
+			return r, ErrChecksum
+		}
 	}
 
 	r.Key = string(key)

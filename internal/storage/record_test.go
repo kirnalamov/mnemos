@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,6 +33,10 @@ func TestEncodeDecode(t *testing.T) {
 	if !bytes.Equal(got.Data, want.Data) {
 		t.Fatal("decoded data differs from original")
 	}
+
+	if got.Type != RecordPut {
+		t.Fatalf("type: got %v, want RecordPut", got.Type)
+	}
 }
 
 func TestDecodeDetectsCorruption(t *testing.T) {
@@ -57,6 +62,7 @@ func TestDecodeRejectsTruncatedRecord(t *testing.T) {
 		t.Fatalf("got error %v, want ErrInvalidRecord", err)
 	}
 }
+
 func TestDecodeRejectsOversizedData(t *testing.T) {
 	encoded, err := Encode(Record{
 		Key:  "test",
@@ -66,8 +72,8 @@ func TestDecodeRejectsOversizedData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// dataSize находится в байтах 10–17 заголовка.
-	binary.BigEndian.PutUint64(encoded[10:18], maxDataSize+1)
+	// В заголовках v2 и v3 поле dataSize находится в байтах 11–18.
+	binary.BigEndian.PutUint64(encoded[11:19], maxDataSize+1)
 
 	_, err = Decode(encoded)
 	if !errors.Is(err, ErrInvalidRecord) {
@@ -94,7 +100,6 @@ func TestStoreOperationsAfterClose(t *testing.T) {
 	if _, err := store.Get("notes/test.txt"); !errors.Is(err, ErrStoreClosed) {
 		t.Errorf("Get error: got %v, want %v", err, ErrStoreClosed)
 	}
-
 }
 
 func TestOpenRejectsCorruptedRecord(t *testing.T) {
@@ -203,11 +208,10 @@ func TestOpenTruncatesIncompleteTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedSize := int64(headerSizeV2 + len(key) + len(data))
+	expectedSize := int64(headerSizeV3 + len(key) + len(data))
 	if info.Size() != expectedSize {
 		t.Fatalf("file size: got %d, want %d", info.Size(), expectedSize)
 	}
-
 }
 
 func TestOpenRejectsCorruptedRecordWithoutTruncating(t *testing.T) {
@@ -274,16 +278,8 @@ func TestDecodeLegacyV1Record(t *testing.T) {
 	binary.BigEndian.PutUint32(encoded[6:10], uint32(len(key)))
 	binary.BigEndian.PutUint64(encoded[10:18], uint64(len(data)))
 
-	// В формате v1 контрольная сумма занимает байты 18–21.
-	// Используем Encode для получения корректной CRC32 данных.
-	v2, err := Encode(Record{
-		Key:  string(key),
-		Data: data,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	copy(encoded[18:22], v2[19:23])
+	// В v1 контрольная сумма данных находится в байтах 18–21.
+	binary.BigEndian.PutUint32(encoded[18:22], crc32.ChecksumIEEE(data))
 
 	copy(encoded[headerSizeV1:], key)
 	copy(encoded[headerSizeV1+len(key):], data)
@@ -316,14 +312,9 @@ func TestStoreReopenLegacyV1Record(t *testing.T) {
 	binary.BigEndian.PutUint32(encoded[6:10], uint32(len(key)))
 	binary.BigEndian.PutUint64(encoded[10:18], uint64(len(data)))
 
-	v2, err := Encode(Record{
-		Key:  string(key),
-		Data: data,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	copy(encoded[18:22], v2[19:23])
+	// Для v1 CRC32 рассчитывается только по данным.
+	binary.BigEndian.PutUint32(encoded[18:22], crc32.ChecksumIEEE(data))
+
 	copy(encoded[headerSizeV1:], key)
 	copy(encoded[headerSizeV1+len(key):], data)
 
@@ -343,5 +334,40 @@ func TestStoreReopenLegacyV1Record(t *testing.T) {
 	}
 	if string(got) != string(data) {
 		t.Fatalf("data: got %q, want %q", got, data)
+	}
+}
+
+func TestDecodeV3DetectsKeyCorruption(t *testing.T) {
+	encoded, err := Encode(Record{
+		Key:  "note-1",
+		Data: []byte("important data"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded[headerSizeV3] ^= 0x01
+
+	_, err = Decode(encoded)
+	if !errors.Is(err, ErrChecksum) {
+		t.Fatalf("got error %v, want ErrChecksum", err)
+	}
+}
+
+func TestDecodeV3DetectsRecordTypeCorruption(t *testing.T) {
+	encoded, err := Encode(Record{
+		Type: RecordPut,
+		Key:  "empty-note",
+		Data: nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded[6] = byte(RecordDelete)
+
+	_, err = Decode(encoded)
+	if !errors.Is(err, ErrChecksum) {
+		t.Fatalf("got error %v, want ErrChecksum", err)
 	}
 }
