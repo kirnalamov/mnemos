@@ -71,9 +71,9 @@ func TestStorePutUpdatesIndex(t *testing.T) {
 		t.Errorf("offset: got %d, want 0", entry.Offset)
 	}
 
-	if entry.Size != len(data)+headerSizeV2+len(key) {
+	if entry.Size != len(data)+headerSizeV3+len(key) {
 		t.Errorf("size: got %d, want %d",
-			entry.Size, len(data)+headerSizeV2+len(key))
+			entry.Size, len(data)+headerSizeV3+len(key))
 	}
 }
 
