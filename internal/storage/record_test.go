@@ -371,3 +371,39 @@ func TestDecodeV3DetectsRecordTypeCorruption(t *testing.T) {
 		t.Fatalf("got error %v, want ErrChecksum", err)
 	}
 }
+
+func TestStoreReopenV3Record(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	key := "notes/v3.txt"
+	data := []byte("data stored in v3")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put(key, data); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open v3 file after restart: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get v3 record after restart: %v", err)
+	}
+
+	if !bytes.Equal(got, data) {
+		t.Fatalf("data: got %q, want %q", got, data)
+	}
+}
