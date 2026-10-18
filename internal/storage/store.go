@@ -121,6 +121,45 @@ func (s *Store) Put(key string, data []byte) error {
 	return nil
 }
 
+func (s *Store) Delete(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrStoreClosed
+	}
+	if s.failed {
+		return ErrStoreFailed
+	}
+
+	if _, ok := s.index[key]; !ok {
+		return ErrNotFound
+	}
+
+	encoded, err := Encode(Record{
+		Type: RecordDelete,
+		Key:  key,
+	})
+	if err != nil {
+		return err
+	}
+
+	offset, err := s.file.Seek(0, os.SEEK_END)
+	if err != nil {
+		return err
+	}
+
+	if err := writeRecord(s.file, offset, encoded); err != nil {
+		if errors.Is(err, ErrRollbackFailed) {
+			s.failed = true
+		}
+		return err
+	}
+
+	delete(s.index, key)
+	return nil
+}
+
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,6 +202,7 @@ func (s *Store) Get(key string) ([]byte, error) {
 
 	return record.Data, nil
 }
+
 func (s *Store) rebuildIndex() error {
 	info, err := s.file.Stat()
 	if err != nil {
@@ -173,26 +213,59 @@ func (s *Store) rebuildIndex() error {
 	var offset int64
 
 	for offset < fileSize {
-		if fileSize-offset < int64(headerSize) {
+		remaining := fileSize - offset
+		if remaining < 6 {
 			return s.file.Truncate(offset)
 		}
 
-		header := make([]byte, headerSize)
-		if _, err := s.file.ReadAt(header, offset); err != nil {
+		var prefix [6]byte
+		if _, err := s.file.ReadAt(prefix[:], offset); err != nil {
 			return err
 		}
 
-		gotMagic := binary.BigEndian.Uint32(header[0:4])
-		gotVersion := binary.BigEndian.Uint16(header[4:6])
-		keySize := binary.BigEndian.Uint32(header[6:10])
-		dataSize := binary.BigEndian.Uint64(header[10:18])
+		gotMagic := binary.BigEndian.Uint32(prefix[0:4])
+		gotVersion := binary.BigEndian.Uint16(prefix[4:6])
 
-		if gotMagic != magic || gotVersion != version {
+		if gotMagic != magic {
 			return fmt.Errorf(
 				"invalid record header at offset %d: %w",
 				offset,
 				ErrInvalidRecord,
 			)
+		}
+
+		var currentHeaderSize int
+		switch gotVersion {
+		case versionV1:
+			currentHeaderSize = headerSizeV1
+		case versionV2:
+			currentHeaderSize = headerSizeV2
+		default:
+			return fmt.Errorf(
+				"unsupported record version at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
+		}
+
+		if remaining < int64(currentHeaderSize) {
+			return s.file.Truncate(offset)
+		}
+
+		header := make([]byte, currentHeaderSize)
+		if _, err := s.file.ReadAt(header, offset); err != nil {
+			return err
+		}
+
+		var keySize uint32
+		var dataSize uint64
+
+		if gotVersion == versionV1 {
+			keySize = binary.BigEndian.Uint32(header[6:10])
+			dataSize = binary.BigEndian.Uint64(header[10:18])
+		} else {
+			keySize = binary.BigEndian.Uint32(header[7:11])
+			dataSize = binary.BigEndian.Uint64(header[11:19])
 		}
 
 		if keySize == 0 || keySize > maxKeySize || dataSize > maxDataSize {
@@ -203,9 +276,8 @@ func (s *Store) rebuildIndex() error {
 			)
 		}
 
-		recordSize := int64(headerSize) + int64(keySize) + int64(dataSize)
-
-		if recordSize > fileSize-offset {
+		recordSize := int64(currentHeaderSize) + int64(keySize) + int64(dataSize)
+		if recordSize > remaining {
 			return s.file.Truncate(offset)
 		}
 
@@ -219,9 +291,20 @@ func (s *Store) rebuildIndex() error {
 			return fmt.Errorf("decode record at offset %d: %w", offset, err)
 		}
 
-		s.index[record.Key] = Entry{
-			Offset: offset,
-			Size:   int(recordSize),
+		switch record.Type {
+		case RecordPut:
+			s.index[record.Key] = Entry{
+				Offset: offset,
+				Size:   int(recordSize),
+			}
+		case RecordDelete:
+			delete(s.index, record.Key)
+		default:
+			return fmt.Errorf(
+				"unknown record type at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
 		}
 
 		offset += recordSize

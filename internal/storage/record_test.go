@@ -203,7 +203,7 @@ func TestOpenTruncatesIncompleteTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedSize := int64(headerSize + len(key) + len(data))
+	expectedSize := int64(headerSizeV2 + len(key) + len(data))
 	if info.Size() != expectedSize {
 		t.Fatalf("file size: got %d, want %d", info.Size(), expectedSize)
 	}

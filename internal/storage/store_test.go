@@ -71,9 +71,9 @@ func TestStorePutUpdatesIndex(t *testing.T) {
 		t.Errorf("offset: got %d, want 0", entry.Offset)
 	}
 
-	if entry.Size != len(data)+headerSize+len(key) {
+	if entry.Size != len(data)+headerSizeV2+len(key) {
 		t.Errorf("size: got %d, want %d",
-			entry.Size, len(data)+headerSize+len(key))
+			entry.Size, len(data)+headerSizeV2+len(key))
 	}
 }
 
@@ -347,5 +347,100 @@ func TestStoreEntersFailedStateAfterRollbackFailure(t *testing.T) {
 
 	if _, err := store.Get("notes/test.txt"); !errors.Is(err, ErrStoreClosed) {
 		t.Errorf("Get after Close: got %v, want ErrStoreClosed", err)
+	}
+}
+
+func TestStoreDelete(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("note-1", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Delete("note-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, err = store.Get("note-1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after Delete: got %v, want %v", err, ErrNotFound)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store.Close()
+
+	_, err = store.Get("note-1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after reopen: got %v, want %v", err, ErrNotFound)
+	}
+}
+
+func TestStoreDeleteNotFound(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "data.mnemos"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	err = store.Delete("missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete missing key: got %v, want %v", err, ErrNotFound)
+	}
+}
+
+func TestStoreDeleteDoesNotRemoveNewerValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("note-1", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete("note-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("note-1", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get("note-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "second" {
+		t.Fatalf("Get: got %q, want %q", got, "second")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	got, err = store.Get("note-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "second" {
+		t.Fatalf("Get after reopen: got %q, want %q", got, "second")
 	}
 }
