@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,6 +33,10 @@ func TestEncodeDecode(t *testing.T) {
 	if !bytes.Equal(got.Data, want.Data) {
 		t.Fatal("decoded data differs from original")
 	}
+
+	if got.Type != RecordPut {
+		t.Fatalf("type: got %v, want RecordPut", got.Type)
+	}
 }
 
 func TestDecodeDetectsCorruption(t *testing.T) {
@@ -57,6 +62,7 @@ func TestDecodeRejectsTruncatedRecord(t *testing.T) {
 		t.Fatalf("got error %v, want ErrInvalidRecord", err)
 	}
 }
+
 func TestDecodeRejectsOversizedData(t *testing.T) {
 	encoded, err := Encode(Record{
 		Key:  "test",
@@ -66,8 +72,8 @@ func TestDecodeRejectsOversizedData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// dataSize находится в байтах 10–17 заголовка.
-	binary.BigEndian.PutUint64(encoded[10:18], maxDataSize+1)
+	// В заголовках v2 и v3 поле dataSize находится в байтах 11–18.
+	binary.BigEndian.PutUint64(encoded[11:19], maxDataSize+1)
 
 	_, err = Decode(encoded)
 	if !errors.Is(err, ErrInvalidRecord) {
@@ -94,7 +100,6 @@ func TestStoreOperationsAfterClose(t *testing.T) {
 	if _, err := store.Get("notes/test.txt"); !errors.Is(err, ErrStoreClosed) {
 		t.Errorf("Get error: got %v, want %v", err, ErrStoreClosed)
 	}
-
 }
 
 func TestOpenRejectsCorruptedRecord(t *testing.T) {
@@ -203,11 +208,10 @@ func TestOpenTruncatesIncompleteTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedSize := int64(headerSizeV2 + len(key) + len(data))
+	expectedSize := int64(headerSizeV3 + len(key) + len(data))
 	if info.Size() != expectedSize {
 		t.Fatalf("file size: got %d, want %d", info.Size(), expectedSize)
 	}
-
 }
 
 func TestOpenRejectsCorruptedRecordWithoutTruncating(t *testing.T) {
@@ -260,5 +264,146 @@ func TestOpenRejectsCorruptedRecordWithoutTruncating(t *testing.T) {
 
 	if after.Size() != originalSize {
 		t.Fatalf("file size changed: got %d, want %d", after.Size(), originalSize)
+	}
+}
+
+func TestDecodeLegacyV1Record(t *testing.T) {
+	key := []byte("legacy-note")
+	data := []byte("data from v1")
+
+	encoded := make([]byte, headerSizeV1+len(key)+len(data))
+
+	binary.BigEndian.PutUint32(encoded[0:4], magic)
+	binary.BigEndian.PutUint16(encoded[4:6], versionV1)
+	binary.BigEndian.PutUint32(encoded[6:10], uint32(len(key)))
+	binary.BigEndian.PutUint64(encoded[10:18], uint64(len(data)))
+
+	// В v1 контрольная сумма данных находится в байтах 18–21.
+	binary.BigEndian.PutUint32(encoded[18:22], crc32.ChecksumIEEE(data))
+
+	copy(encoded[headerSizeV1:], key)
+	copy(encoded[headerSizeV1+len(key):], data)
+
+	got, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode v1 record: %v", err)
+	}
+
+	if got.Type != RecordPut {
+		t.Fatalf("type: got %v, want RecordPut", got.Type)
+	}
+	if got.Key != string(key) {
+		t.Fatalf("key: got %q, want %q", got.Key, key)
+	}
+	if !bytes.Equal(got.Data, data) {
+		t.Fatalf("data: got %q, want %q", got.Data, data)
+	}
+}
+
+func TestStoreReopenLegacyV1Record(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	key := []byte("legacy-note")
+	data := []byte("data from v1")
+
+	encoded := make([]byte, headerSizeV1+len(key)+len(data))
+	binary.BigEndian.PutUint32(encoded[0:4], magic)
+	binary.BigEndian.PutUint16(encoded[4:6], versionV1)
+	binary.BigEndian.PutUint32(encoded[6:10], uint32(len(key)))
+	binary.BigEndian.PutUint64(encoded[10:18], uint64(len(data)))
+
+	// Для v1 CRC32 рассчитывается только по данным.
+	binary.BigEndian.PutUint32(encoded[18:22], crc32.ChecksumIEEE(data))
+
+	copy(encoded[headerSizeV1:], key)
+	copy(encoded[headerSizeV1+len(key):], data)
+
+	if err := os.WriteFile(path, encoded, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy v1 file: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get(string(key))
+	if err != nil {
+		t.Fatalf("Get legacy key: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("data: got %q, want %q", got, data)
+	}
+}
+
+func TestDecodeV3DetectsKeyCorruption(t *testing.T) {
+	encoded, err := Encode(Record{
+		Key:  "note-1",
+		Data: []byte("important data"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded[headerSizeV3] ^= 0x01
+
+	_, err = Decode(encoded)
+	if !errors.Is(err, ErrChecksum) {
+		t.Fatalf("got error %v, want ErrChecksum", err)
+	}
+}
+
+func TestDecodeV3DetectsRecordTypeCorruption(t *testing.T) {
+	encoded, err := Encode(Record{
+		Type: RecordPut,
+		Key:  "empty-note",
+		Data: nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded[6] = byte(RecordDelete)
+
+	_, err = Decode(encoded)
+	if !errors.Is(err, ErrChecksum) {
+		t.Fatalf("got error %v, want ErrChecksum", err)
+	}
+}
+
+func TestStoreReopenV3Record(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	key := "notes/v3.txt"
+	data := []byte("data stored in v3")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put(key, data); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open v3 file after restart: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get v3 record after restart: %v", err)
+	}
+
+	if !bytes.Equal(got, data) {
+		t.Fatalf("data: got %q, want %q", got, data)
 	}
 }

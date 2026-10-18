@@ -240,6 +240,8 @@ func (s *Store) rebuildIndex() error {
 			currentHeaderSize = headerSizeV1
 		case versionV2:
 			currentHeaderSize = headerSizeV2
+		case versionV3:
+			currentHeaderSize = headerSizeV3
 		default:
 			return fmt.Errorf(
 				"unsupported record version at offset %d: %w",
