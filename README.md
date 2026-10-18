@@ -17,54 +17,65 @@
 
 Mnemos is an educational, file-based object storage engine written in Go. It explores persistent storage, binary record serialization, in-memory indexing, and recovery mechanisms.
 
-Objects are stored in a local file and identified by string keys. An in-memory index references the latest stored version of each object.
+Objects are identified by string keys and stored as records in a local file. An in-memory index points to the latest record for each live key.
 
 ### Features
 
-- **Object storage:** write and retrieve objects using string keys.
-- **Append-only storage:** append new records instead of overwriting existing records.
-- **In-memory indexing:** maintain object offsets and record sizes.
-- **Persistence:** retain stored objects across process restarts.
-- **Index recovery:** reconstruct the index by scanning the storage file during initialization.
-- **Record versioning:** read supported record format versions and write the current format.
-- **Data integrity:** validate record headers, format versions, field sizes, and CRC32 checksums.
-- **Deletion:** append deletion records and remove deleted keys from the in-memory index.
-- **Incomplete-tail recovery:** truncate an incomplete final record during initialization.
-- **Write error handling:** attempt to roll back incomplete writes and enter a failed state if rollback is unsuccessful.
+- **Object storage:** write and retrieve values using string keys.
+- **Append-only writes:** updates append a new record instead of overwriting historical bytes.
+- **In-memory index:** track the offset and size of the latest record for each live key.
+- **Persistence:** retain objects across process restarts.
+- **Index recovery:** rebuild the index by scanning the storage file on open.
+- **Record format versioning:** read supported v1, v2, and v3 records; write new records in v3.
+- **Integrity checks:** validate record structure, supported versions, field sizes, and CRC32 checksums.
+- **Deletion records:** record deletion in the file and remove the key from the live index.
+- **Incomplete-tail recovery:** truncate an incomplete final record when opening the store.
+- **Write error handling:** attempt to roll back an incomplete write; if rollback fails, mark the store as failed.
 - **Synchronization:** protect storage operations with a mutex.
-- **Command-line interface:** store, retrieve, and delete objects from the terminal.
+- **Command-line interface:** put, get, and delete values from a terminal.
 
 ### Architecture
 
-Mnemos is organized into three main components:
+The project has three main components:
 
 - `cmd/mnemos` — command-line interface and application entry point.
 - `internal/engine` — application-facing API for storage operations.
-- `internal/storage` — binary record format, file operations, indexing, and recovery.
+- `internal/storage` — binary record encoding and decoding, file operations, indexing, and recovery.
 
-The storage file uses a binary record format containing a header, an object key, and object data. Records include a format signature, version, key length, data length, and checksum. Multi-byte numeric fields use big-endian byte order.
+The storage file is a sequence of binary records. A record contains a format signature, version, record type where supported, key and data lengths, a checksum, the key, and the data. Multi-byte numeric fields use big-endian byte order.
 
-Writing an existing key appends a new record and updates the in-memory index. Deletion appends a deletion record rather than removing historical bytes from the file.
+The record versions differ in their integrity coverage:
 
-The index is rebuilt by scanning the file when the store is opened. Incomplete trailing records are handled during recovery; corrupted records are subject to validation.
+- **v1 and v2:** CRC32 protects the record data. The v1 format implies a put record; v2 includes an explicit record type.
+- **v3:** CRC32 covers the record type, key and data length fields, key, and data.
+
+When a key is updated, Mnemos appends a new record and points the in-memory index to it. Deletion appends a tombstone record; it does not physically remove previous record bytes. The storage file can therefore grow as values are updated or deleted.
+
+On open, Mnemos scans records and rebuilds the index. An incomplete final record can be truncated during recovery. A complete record that fails structural or checksum validation is treated as corruption rather than silently repaired.
 
 ### Requirements
 
-- Go 1.27 or a compatible version supporting the module's declared requirements.
+- A Go version that satisfies the `go` directive in `go.mod`.
 - A local filesystem.
-- The project's Go dependencies.
+- The dependencies declared by the Go module.
 
 ### Configuration
 
-Set `MNEMOS_DATA_DIR` to the directory where Mnemos should store its data file.
+Mnemos reads `MNEMOS_DATA_DIR` from the process environment. It also attempts to load a `.env` file from the current working directory.
 
-Create a `.env` file in the working directory:
+Create a `.env` file in the directory from which you run the command:
 
 ```dotenv
 MNEMOS_DATA_DIR=./data
 ```
 
-The storage file is created as `data.mnemos` inside the configured directory.
+The directory is created if needed. The storage file is named `data.mnemos` inside the configured directory. With the example above, the path is `./data/data.mnemos` relative to the working directory.
+
+You can also set the variable directly in the shell:
+
+```bash
+export MNEMOS_DATA_DIR=./data
+```
 
 ### Build
 
@@ -104,7 +115,7 @@ Delete a key:
 ./mnemos delete note-1
 ```
 
-Reading a missing or deleted key returns an error.
+Reading a missing or deleted key returns an error. The CLI accepts the value as a single command-line argument; quote it when it contains spaces.
 
 ### Testing
 
@@ -126,11 +137,11 @@ Run static analysis:
 go vet ./...
 ```
 
-### Project Status
+### Project status and limitations
 
-Mnemos is an educational project under active development. The current implementation includes persistent file-based records, an in-memory index, index reconstruction, deletion records, recovery from incomplete trailing records, and a basic command-line interface.
+Mnemos is an educational project under active development, not a production-ready storage system. The current implementation provides persistent records, an in-memory index, index reconstruction, deletion records, incomplete-tail recovery, and a basic CLI.
 
-The project is not yet presented as a production-ready storage system.
+Because writes are append-only, old values and deletion records remain in the file. Storage compaction and physical reclamation of historical records are not described as supported features.
 
 ---
 
@@ -138,24 +149,24 @@ The project is not yet presented as a production-ready storage system.
 
 ### Обзор
 
-Mnemos — учебное файловое объектное хранилище, реализованное на языке Go. Проект предназначен для изучения персистентного хранения данных, бинарной сериализации записей, индексации в оперативной памяти и механизмов восстановления.
+Mnemos — учебное файловое объектное хранилище, реализованное на Go. Проект позволяет изучать персистентное хранение данных, бинарную сериализацию записей, индексацию в оперативной памяти и механизмы восстановления.
 
-Объекты сохраняются в локальном файле и идентифицируются строковыми ключами. Индекс в оперативной памяти ссылается на последнюю актуальную версию каждого объекта.
+Объекты идентифицируются строковыми ключами и хранятся в локальном файле в виде записей. Индекс в оперативной памяти указывает на последнюю запись каждого существующего ключа.
 
 ### Возможности
 
-- **Хранение объектов:** запись и чтение объектов по строковым ключам.
-- **Append-only-модель:** добавление новых записей без перезаписи ранее сохранённых записей.
-- **Индексация в оперативной памяти:** хранение смещений объектов и размеров записей.
+- **Хранение объектов:** запись и чтение значений по строковым ключам.
+- **Append-only-запись:** обновление добавляет новую запись, не перезаписывая исторические байты.
+- **Индекс в оперативной памяти:** хранение смещения и размера последней записи каждого существующего ключа.
 - **Персистентность:** сохранение объектов между перезапусками процесса.
-- **Восстановление индекса:** повторное построение индекса путём сканирования файла при открытии хранилища.
-- **Версионирование формата:** чтение поддерживаемых версий записей и запись в актуальном формате.
-- **Контроль целостности:** проверка заголовков, версий формата, размеров полей и контрольных сумм CRC32.
-- **Удаление объектов:** добавление записей удаления и исключение удалённых ключей из индекса.
-- **Восстановление после неполной записи:** усечение незавершённой последней записи при инициализации.
-- **Обработка ошибок записи:** попытка отката незавершённой записи и переход в аварийное состояние при неудачном откате.
+- **Восстановление индекса:** повторное построение индекса сканированием файла при открытии хранилища.
+- **Версионирование формата:** чтение поддерживаемых записей v1, v2 и v3; новые записи создаются в формате v3.
+- **Проверка целостности:** проверка структуры записей, версий, размеров полей и контрольных сумм CRC32.
+- **Записи удаления:** фиксация удаления в файле и исключение ключа из актуального индекса.
+- **Восстановление после неполной записи:** усечение незавершённой последней записи при открытии хранилища.
+- **Обработка ошибок записи:** попытка отката незавершённой записи; при неудачном откате хранилище переводится в аварийное состояние.
 - **Синхронизация:** защита операций с хранилищем с помощью мьютекса.
-- **CLI:** управление объектами через командную строку.
+- **CLI:** запись, чтение и удаление значений через терминал.
 
 ### Архитектура
 
@@ -163,31 +174,42 @@ Mnemos — учебное файловое объектное хранилище
 
 - `cmd/mnemos` — интерфейс командной строки и точка входа приложения.
 - `internal/engine` — API верхнего уровня для операций с хранилищем.
-- `internal/storage` — бинарный формат записей, файловые операции, индексация и восстановление.
+- `internal/storage` — кодирование и декодирование бинарных записей, файловые операции, индексация и восстановление.
 
-Хранилище использует бинарный формат записи, состоящий из заголовка, ключа объекта и его содержимого. Каждая запись содержит сигнатуру формата, версию, длину ключа, длину данных и контрольную сумму. Многобайтовые числовые поля кодируются в порядке big-endian.
+Файл хранилища представляет собой последовательность бинарных записей. Запись содержит сигнатуру формата, версию, тип записи (если он предусмотрен версией), размеры ключа и данных, контрольную сумму, ключ и данные. Многобайтовые числовые поля кодируются в порядке big-endian.
 
-При повторной записи объекта новая запись добавляется в конец файла, а индекс обновляется. Удаление также оформляется отдельной записью, поэтому исторические данные физически не удаляются из файла.
+Версии формата отличаются покрытием контрольной суммы:
 
-При открытии хранилища индекс восстанавливается сканированием файла. Незавершённые записи в конце файла обрабатываются механизмом восстановления; повреждённые записи проходят проверку целостности.
+- **v1 и v2:** CRC32 защищает данные записи. В формате v1 тип записи подразумевается; в v2 тип записи указан явно.
+- **v3:** CRC32 охватывает тип записи, поля размеров ключа и данных, ключ и данные.
+
+При обновлении ключа Mnemos добавляет новую запись в конец файла и перенаправляет на неё индекс. Удаление оформляется tombstone-записью: ранее записанные байты физически не удаляются. Поэтому при обновлении и удалении объектов файл хранилища может увеличиваться.
+
+При открытии Mnemos сканирует записи и восстанавливает индекс. Незавершённая последняя запись может быть усечена в процессе восстановления. Полная запись, не прошедшая структурную проверку или проверку контрольной суммы, считается повреждённой, а не исправляется автоматически.
 
 ### Требования
 
-- Go 1.27 или совместимая версия, удовлетворяющая требованиям `go.mod`.
+- Версия Go, удовлетворяющая директиве `go` в `go.mod`.
 - Локальная файловая система.
-- Зависимости проекта Go.
+- Зависимости, объявленные в Go-модуле проекта.
 
 ### Настройка
 
-Установите переменную окружения `MNEMOS_DATA_DIR`, указывающую каталог хранения данных.
+Mnemos читает `MNEMOS_DATA_DIR` из окружения процесса. Также программа пытается загрузить файл `.env` из текущего рабочего каталога.
 
-Создайте файл `.env` в рабочем каталоге:
+Создайте `.env` в каталоге, из которого запускаете команду:
 
 ```dotenv
 MNEMOS_DATA_DIR=./data
 ```
 
-Внутри указанного каталога будет создан файл `data.mnemos`.
+Каталог будет создан при необходимости. Файл хранилища называется `data.mnemos` и располагается внутри указанного каталога. В приведённом примере путь относительно рабочего каталога — `./data/data.mnemos`.
+
+Переменную можно задать и непосредственно в оболочке:
+
+```bash
+export MNEMOS_DATA_DIR=./data
+```
 
 ### Сборка
 
@@ -227,7 +249,7 @@ go build -o mnemos ./cmd/mnemos
 ./mnemos delete note-1
 ```
 
-При чтении отсутствующего или удалённого ключа возвращается ошибка.
+При чтении отсутствующего или удалённого ключа возвращается ошибка. CLI принимает значение одним аргументом командной строки; если в нём есть пробелы, заключите значение в кавычки.
 
 ### Тестирование
 
@@ -249,8 +271,8 @@ go test -race ./...
 go vet ./...
 ```
 
-### Статус проекта
+### Статус и ограничения проекта
 
-Mnemos — учебный проект в активной разработке. Текущая реализация включает файловое хранение записей, индекс в оперативной памяти, восстановление индекса, записи удаления, восстановление после неполных записей в конце файла и базовый интерфейс командной строки.
+Mnemos — учебный проект в активной разработке, а не готовая к промышленной эксплуатации система. Текущая реализация включает файловое хранение записей, индекс в оперативной памяти, восстановление индекса, записи удаления, восстановление после неполных записей в конце файла и базовый CLI.
 
-Проект пока не позиционируется как готовая к промышленной эксплуатации система хранения данных.
+Поскольку запись организована по модели append-only, старые версии значений и записи удаления остаются в файле. Уплотнение хранилища и физическое освобождение места, занятого историческими записями, не заявлены как поддерживаемые возможности.
