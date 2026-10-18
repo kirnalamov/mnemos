@@ -10,17 +10,29 @@ import (
 
 var ErrStoreClosed = errors.New("storage is closed")
 var ErrNotFound = errors.New("object not found")
+var ErrStoreFailed = errors.New("storage is in failed state")
+var ErrRollbackFailed = errors.New("rollback after failed write was unsuccessful")
 
 type Entry struct {
 	Offset int64
 	Size   int
 }
 
+type storageFile interface {
+	Write([]byte) (int, error)
+	Seek(int64, int) (int64, error)
+	Truncate(int64) error
+	ReadAt([]byte, int64) (int, error)
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
 type Store struct {
 	mu     sync.Mutex
-	file   *os.File
+	file   storageFile
 	index  map[string]Entry
 	closed bool
+	failed bool
 }
 
 type recordWriter interface {
@@ -41,6 +53,7 @@ func writeRecord(w recordWriter, offset int64, encoded []byte) error {
 
 	if truncateErr := w.Truncate(offset); truncateErr != nil {
 		return errors.Join(
+			ErrRollbackFailed,
 			fmt.Errorf("write record: %w", err),
 			fmt.Errorf("rollback incomplete write: %w", truncateErr),
 		)
@@ -78,7 +91,9 @@ func (s *Store) Put(key string, data []byte) error {
 	if s.closed {
 		return ErrStoreClosed
 	}
-
+	if s.failed {
+		return ErrStoreFailed
+	}
 	encoded, err := Encode(Record{
 		Key:  key,
 		Data: data,
@@ -93,9 +108,11 @@ func (s *Store) Put(key string, data []byte) error {
 	}
 
 	if err := writeRecord(s.file, offset, encoded); err != nil {
+		if errors.Is(err, ErrRollbackFailed) {
+			s.failed = true
+		}
 		return err
 	}
-
 	s.index[key] = Entry{
 		Offset: offset,
 		Size:   len(encoded),
@@ -122,6 +139,9 @@ func (s *Store) Get(key string) ([]byte, error) {
 
 	if s.closed {
 		return nil, ErrStoreClosed
+	}
+	if s.failed {
+		return nil, ErrStoreFailed
 	}
 
 	entry, ok := s.index[key]
