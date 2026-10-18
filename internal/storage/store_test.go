@@ -444,3 +444,128 @@ func TestStoreDeleteDoesNotRemoveNewerValue(t *testing.T) {
 		t.Fatalf("Get after reopen: got %q, want %q", got, "second")
 	}
 }
+
+func TestStoreOpenTruncatesIncompleteTailHeader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("note-1", []byte("saved data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validSize := info.Size()
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte{1, 2, 3}); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open with incomplete tail: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get("note-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "saved data" {
+		t.Fatalf("Get: got %q, want %q", got, "saved data")
+	}
+
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != validSize {
+		t.Fatalf("file size: got %d, want %d", info.Size(), validSize)
+	}
+}
+
+func TestStoreOpenTruncatesIncompleteTailRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("note-1", []byte("saved data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validSize := info.Size()
+
+	partial, err := Encode(Record{
+		Key:  "note-2",
+		Data: []byte("incomplete data"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial = partial[:len(partial)-1]
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(partial); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open with incomplete record: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get("note-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "saved data" {
+		t.Fatalf("Get: got %q, want %q", got, "saved data")
+	}
+
+	if _, err := store.Get("note-2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get incomplete record: got %v, want %v", err, ErrNotFound)
+	}
+
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != validSize {
+		t.Fatalf("file size: got %d, want %d", info.Size(), validSize)
+	}
+}

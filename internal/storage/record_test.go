@@ -262,3 +262,86 @@ func TestOpenRejectsCorruptedRecordWithoutTruncating(t *testing.T) {
 		t.Fatalf("file size changed: got %d, want %d", after.Size(), originalSize)
 	}
 }
+
+func TestDecodeLegacyV1Record(t *testing.T) {
+	key := []byte("legacy-note")
+	data := []byte("data from v1")
+
+	encoded := make([]byte, headerSizeV1+len(key)+len(data))
+
+	binary.BigEndian.PutUint32(encoded[0:4], magic)
+	binary.BigEndian.PutUint16(encoded[4:6], versionV1)
+	binary.BigEndian.PutUint32(encoded[6:10], uint32(len(key)))
+	binary.BigEndian.PutUint64(encoded[10:18], uint64(len(data)))
+
+	// В формате v1 контрольная сумма занимает байты 18–21.
+	// Используем Encode для получения корректной CRC32 данных.
+	v2, err := Encode(Record{
+		Key:  string(key),
+		Data: data,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(encoded[18:22], v2[19:23])
+
+	copy(encoded[headerSizeV1:], key)
+	copy(encoded[headerSizeV1+len(key):], data)
+
+	got, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode v1 record: %v", err)
+	}
+
+	if got.Type != RecordPut {
+		t.Fatalf("type: got %v, want RecordPut", got.Type)
+	}
+	if got.Key != string(key) {
+		t.Fatalf("key: got %q, want %q", got.Key, key)
+	}
+	if !bytes.Equal(got.Data, data) {
+		t.Fatalf("data: got %q, want %q", got.Data, data)
+	}
+}
+
+func TestStoreReopenLegacyV1Record(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	key := []byte("legacy-note")
+	data := []byte("data from v1")
+
+	encoded := make([]byte, headerSizeV1+len(key)+len(data))
+	binary.BigEndian.PutUint32(encoded[0:4], magic)
+	binary.BigEndian.PutUint16(encoded[4:6], versionV1)
+	binary.BigEndian.PutUint32(encoded[6:10], uint32(len(key)))
+	binary.BigEndian.PutUint64(encoded[10:18], uint64(len(data)))
+
+	v2, err := Encode(Record{
+		Key:  string(key),
+		Data: data,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(encoded[18:22], v2[19:23])
+	copy(encoded[headerSizeV1:], key)
+	copy(encoded[headerSizeV1+len(key):], data)
+
+	if err := os.WriteFile(path, encoded, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy v1 file: %v", err)
+	}
+	defer store.Close()
+
+	got, err := store.Get(string(key))
+	if err != nil {
+		t.Fatalf("Get legacy key: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("data: got %q, want %q", got, data)
+	}
+}
