@@ -31,7 +31,7 @@ Mnemos is being developed incrementally, with an emphasis on understanding stora
 - **Record format versioning:** read supported v1, v2, and v3 records; write new records in v3.
 - **Integrity checks:** validate record structure, supported format versions, field sizes, and CRC32 checksums.
 - **Deletion records:** represent deletions with tombstones and remove deleted keys from the live index.
-- **Incomplete-tail recovery:** truncate an incomplete final record during recovery.
+- **Recovery validation:** detect incomplete or corrupted records during startup without silently modifying the storage file.
 - **Write error handling:** attempt to roll back incomplete writes and mark the store as failed if rollback cannot be completed safely.
 - **Synchronization:** protect storage operations with a mutex.
 - **Compaction:** rewrite live records into a compacted storage file to reclaim space occupied by historical records.
@@ -54,7 +54,7 @@ The supported record versions differ in their structure and integrity coverage:
 
 When a key is updated, Mnemos appends a new record and updates the in-memory index. Deletion appends a tombstone rather than physically removing historical bytes.
 
-When the store is opened, Mnemos scans the file and rebuilds the index. An incomplete final record can be truncated during recovery. A complete record that fails structural or checksum validation is treated as corruption rather than silently repaired.
+When the store is opened, Mnemos scans the file and rebuilds the index. Incomplete records, unsupported format versions, and records that fail structural or checksum validation cause recovery to fail. The storage file is not automatically truncated or silently repaired when such errors are detected.
 
 Compaction rewrites the current live records into a replacement storage file. It is intended to reclaim space occupied by obsolete values and deletion records.
 
@@ -160,11 +160,11 @@ go build ./...
 
 Mnemos is an educational project under active development. It is not yet presented as a production-ready storage system.
 
-The current implementation provides file-based records, an in-memory index, index reconstruction, deletion records, incomplete-tail recovery, write rollback handling, compaction, and a basic CLI.
+The current implementation provides file-based records, an in-memory index, index reconstruction, deletion records, recovery validation, write rollback handling, compaction, and a basic CLI.
 
 The storage engine currently relies on a local file and an in-memory index. It does not yet provide an S3-compatible API, distributed storage, replication, or a persistent on-disk index.
 
-Append-only updates retain historical records until compaction reclaims their space. Durability, crash recovery, concurrency, and compaction guarantees must continue to be validated through targeted tests before the system can be considered suitable for production workloads.
+Durability guarantees under operating system crashes, filesystem failures, and hardware faults require further validation. Append-only updates retain historical records until compaction reclaims their space. Concurrency and compaction guarantees must also continue to be validated through targeted tests before the system can be considered suitable for production workloads.
 
 ---
 
@@ -188,7 +188,7 @@ Mnemos развивается постепенно, с акцентом на п�
 - **Версионирование формата записей:** чтение поддерживаемых записей v1, v2 и v3; новые записи создаются в формате v3.
 - **Проверка целостности:** проверка структуры записей, поддерживаемых версий формата, размеров полей и контрольных сумм CRC32.
 - **Записи удаления:** фиксация удаления с помощью tombstone-записей и исключение удалённых ключей из актуального индекса.
-- **Восстановление после неполной записи:** усечение незавершённой последней записи при восстановлении.
+- **Проверка при восстановлении:** обнаружение неполных и повреждённых записей при открытии хранилища без автоматического изменения файла.
 - **Обработка ошибок записи:** попытка отката незавершённой записи; при невозможности безопасного отката хранилище переводится в аварийное состояние.
 - **Синхронизация:** защита операций с хранилищем с помощью мьютекса.
 - **Компактизация:** перезапись актуальных записей в новый файл для освобождения места, занятого историческими данными.
@@ -211,7 +211,7 @@ Mnemos развивается постепенно, с акцентом на п�
 
 При обновлении ключа Mnemos добавляет новую запись в конец файла и обновляет индекс в оперативной памяти. Удаление оформляется tombstone-записью, а ранее записанные байты физически не удаляются сразу.
 
-При открытии хранилища Mnemos сканирует файл и восстанавливает индекс. Незавершённая последняя запись может быть усечена в процессе восстановления. Полная запись, не прошедшая структурную проверку или проверку контрольной суммы, считается повреждённой, а не исправляется автоматически.
+При открытии хранилища Mnemos сканирует файл и восстанавливает индекс. Если обнаружена неполная запись, неподдерживаемая версия формата или запись, не прошедшая структурную проверку либо проверку контрольной суммы, восстановление завершается ошибкой. При обнаружении таких ошибок файл хранилища автоматически не усекается и не исправляется без уведомления.
 
 Компактизация переносит актуальные записи в новый файл. Она предназначена для освобождения места, занятого устаревшими значениями и записями удаления.
 
@@ -317,8 +317,8 @@ go build ./...
 
 Mnemos — учебный проект в активной разработке, а не готовая к промышленной эксплуатации система хранения данных.
 
-Текущая реализация включает файловое хранение записей, индекс в оперативной памяти, восстановление индекса, записи удаления, восстановление после неполных записей в конце файла, обработку ошибок записи, компактизацию и базовый CLI.
+Текущая реализация включает файловое хранение записей, индекс в оперативной памяти, восстановление индекса, записи удаления, проверку целостности при восстановлении, обработку ошибок записи, компактизацию и базовый CLI.
 
 Движок хранения пока использует локальный файл и индекс в оперативной памяти. S3-совместимый API, распределённое хранение, репликация и персистентный индекс на диске ещё не реализованы.
 
-При append-only-обновлениях исторические записи сохраняются до компактизации. Гарантии долговечности, восстановления после сбоев, конкурентного доступа и компактизации необходимо продолжать проверять целевыми тестами, прежде чем считать систему пригодной для промышленной нагрузки.
+Гарантии сохранности данных при сбоях операционной системы, файловой системы или оборудования требуют дальнейшей проверки. При append-only-обновлениях исторические записи сохраняются до освобождения занятого ими места в процессе компактизации. Гарантии конкурентного доступа и компактизации также необходимо продолжать проверять целевыми тестами, прежде чем считать систему пригодной для промышленной нагрузки.
