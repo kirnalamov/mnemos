@@ -140,7 +140,7 @@ func TestOpenRejectsCorruptedRecord(t *testing.T) {
 	}
 }
 
-func TestOpenTruncatesIncompleteTail(t *testing.T) {
+func TestOpenRejectsIncompleteTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.mnemos")
 
 	store, err := Open(path)
@@ -183,34 +183,31 @@ func TestOpenTruncatesIncompleteTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err = Open(path)
-	if err != nil {
-		t.Fatalf("Open should recover incomplete tail: %v", err)
-	}
-	defer store.Close()
-
-	got, err := store.Get(key)
-	if err != nil {
-		t.Fatalf("Get existing record: %v", err)
-	}
-
-	if string(got) != string(data) {
-		t.Fatalf("data: got %q, want %q", got, data)
-	}
-
-	_, err = store.Get("notes/incomplete.txt")
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("incomplete key error: got %v, want %v", err, ErrNotFound)
-	}
-
+	// Запоминаем размер файла с незавершённой записью.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	originalSize := info.Size()
 
-	expectedSize := int64(headerSizeV3 + len(key) + len(data))
-	if info.Size() != expectedSize {
-		t.Fatalf("file size: got %d, want %d", info.Size(), expectedSize)
+	store, err = Open(path)
+	if err == nil {
+		store.Close()
+		t.Fatal("expected Open to reject incomplete tail")
+	}
+
+	// Open не должен удалять потенциально повреждённые данные.
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if info.Size() != originalSize {
+		t.Fatalf(
+			"file size changed: got %d, want %d",
+			info.Size(),
+			originalSize,
+		)
 	}
 }
 
@@ -266,7 +263,74 @@ func TestOpenRejectsCorruptedRecordWithoutTruncating(t *testing.T) {
 		t.Fatalf("file size changed: got %d, want %d", after.Size(), originalSize)
 	}
 }
+func TestOpenRejectsCorruptedTailRecordLengthWithoutTruncating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
 
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/first.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("notes/second.txt", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSize := before.Size()
+
+	// В v3 поле dataSize занимает байты 11–18 заголовка.
+	// Увеличиваем длину последней записи на один байт.
+	lastOffset := int64(
+		headerSizeV3 + len("notes/first.txt") + len("first"),
+	)
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var b [1]byte
+	if _, err := file.ReadAt(b[:], lastOffset+18); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	b[0]++
+
+	if _, err := file.WriteAt(b[:], lastOffset+18); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err == nil {
+		store.Close()
+		t.Fatal("expected Open to reject corrupted tail record length")
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != originalSize {
+		t.Fatalf(
+			"file size changed: got %d, want %d",
+			after.Size(),
+			originalSize,
+		)
+	}
+}
 func TestDecodeLegacyV1Record(t *testing.T) {
 	key := []byte("legacy-note")
 	data := []byte("data from v1")
@@ -405,5 +469,236 @@ func TestStoreReopenV3Record(t *testing.T) {
 
 	if !bytes.Equal(got, data) {
 		t.Fatalf("data: got %q, want %q", got, data)
+	}
+}
+
+func TestOpenRejectsChecksumCorruptionWithoutModifyingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/test.txt", []byte("important data")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Меняем последний байт данных, не пересчитывая CRC.
+	corrupted := append([]byte(nil), before...)
+	corrupted[len(corrupted)-1] ^= 0x01
+
+	if err := os.WriteFile(path, corrupted, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path)
+	if !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Open error: got %v, want ErrChecksum", err)
+	}
+
+	afterOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(afterOpen, beforeOpen) {
+		t.Fatal("file contents changed after Open rejected checksum corruption")
+	}
+}
+
+func TestOpenRejectsCorruptionInMiddleWithoutModifyingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/first.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/second.txt", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/third.txt", []byte("third")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Размер первой записи известен из формата v3.
+	secondOffset := headerSizeV3 + len("notes/first.txt") + len("first")
+
+	// Меняем байт данных второй записи, оставляя её CRC прежней.
+	corrupted := append([]byte(nil), before...)
+	secondDataOffset := secondOffset + headerSizeV3 + len("notes/second.txt")
+	corrupted[secondDataOffset] ^= 0x01
+
+	if err := os.WriteFile(path, corrupted, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path)
+	if !errors.Is(err, ErrChecksum) {
+		t.Fatalf("Open error: got %v, want ErrChecksum", err)
+	}
+
+	afterOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(afterOpen, beforeOpen) {
+		t.Fatal("file contents changed after Open rejected middle-record corruption")
+	}
+}
+
+func TestDecodeRejectsUnsupportedVersion(t *testing.T) {
+	encoded, err := Encode(Record{
+		Key:  "notes/test.txt",
+		Data: []byte("data"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Поле версии занимает байты 4–5.
+	binary.BigEndian.PutUint16(encoded[4:6], 999)
+
+	_, err = Decode(encoded)
+	if !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("Decode error: got %v, want ErrInvalidRecord", err)
+	}
+}
+
+func TestOpenRejectsUnknownRecordTypeWithoutModifyingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/test.txt", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corrupted := append([]byte(nil), before...)
+	corrupted[6] = 99 // Неизвестный тип записи в формате v3.
+
+	if err := os.WriteFile(path, corrupted, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Open(path)
+	if !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("Open error: got %v, want ErrInvalidRecord", err)
+	}
+
+	afterOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(afterOpen, beforeOpen) {
+		t.Fatal("file contents changed after Open rejected unknown record type")
+	}
+}
+
+func TestOpenFailureLeavesFileUnchangedAndAccessible(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/first.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corrupted := append([]byte(nil), original...)
+	corrupted[0] ^= 0xFF
+
+	if err := os.WriteFile(path, corrupted, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failedStore, err := Open(path)
+	if err == nil {
+		if failedStore != nil {
+			_ = failedStore.Close()
+		}
+		t.Fatal("Open succeeded for a corrupted file")
+	}
+
+	if failedStore != nil {
+		t.Fatal("Open returned a non-nil Store after failure")
+	}
+
+	afterOpen, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("file is not accessible after Open failure: %v", err)
+	}
+
+	if !bytes.Equal(afterOpen, beforeOpen) {
+		t.Fatal("file contents changed after Open failure")
 	}
 }

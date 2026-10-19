@@ -265,9 +265,14 @@ func (s *Store) rebuildIndex() error {
 	var offset int64
 
 	for offset < fileSize {
+
 		remaining := fileSize - offset
 		if remaining < 6 {
-			return s.file.Truncate(offset)
+			return fmt.Errorf(
+				"incomplete record header at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
 		}
 
 		var prefix [6]byte
@@ -303,7 +308,11 @@ func (s *Store) rebuildIndex() error {
 		}
 
 		if remaining < int64(currentHeaderSize) {
-			return s.file.Truncate(offset)
+			return fmt.Errorf(
+				"incomplete record header at offset %d: %w",
+				offset,
+				ErrInvalidRecord,
+			)
 		}
 
 		header := make([]byte, currentHeaderSize)
@@ -332,9 +341,14 @@ func (s *Store) rebuildIndex() error {
 
 		recordSize := int64(currentHeaderSize) + int64(keySize) + int64(dataSize)
 		if recordSize > remaining {
-			return s.file.Truncate(offset)
+			return fmt.Errorf(
+				"incomplete record at offset %d: declared size %d, remaining %d: %w",
+				offset,
+				recordSize,
+				remaining,
+				ErrInvalidRecord,
+			)
 		}
-
 		encoded := make([]byte, int(recordSize))
 		if _, err := s.file.ReadAt(encoded, offset); err != nil {
 			return err
