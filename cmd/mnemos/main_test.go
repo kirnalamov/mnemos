@@ -116,6 +116,16 @@ func TestValidateArgs(t *testing.T) {
 			args:    []string{"unknown"},
 			wantErr: true,
 		},
+		{
+			name:    "valid compact",
+			args:    []string{"compact"},
+			wantErr: false,
+		},
+		{
+			name:    "compact with extra args",
+			args:    []string{"compact", "extra"},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -140,5 +150,57 @@ func TestRunHelpDoesNotRequireDataDirectory(t *testing.T) {
 		if err := run(args); err != nil {
 			t.Errorf("run(%v) error = %v, want nil", args, err)
 		}
+	}
+}
+
+func TestRunCompactReclaimsHistoricalRecords(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("MNEMOS_DATA_DIR", dataDir)
+
+	commands := [][]string{
+		{"put", "note-1", "old value that takes space"},
+		{"put", "note-1", "latest"},
+		{"put", "deleted", "another value that takes space"},
+		{"delete", "deleted"},
+	}
+
+	for _, args := range commands {
+		if err := run(args); err != nil {
+			t.Fatalf("run(%v): %v", args, err)
+		}
+	}
+
+	path := filepath.Join(dataDir, "data.mnemos")
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := run([]string{"compact"}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if after.Size() >= before.Size() {
+		t.Fatalf(
+			"compact did not reduce file size: before=%d after=%d",
+			before.Size(),
+			after.Size(),
+		)
+	}
+
+	// Проверяем, что актуальное значение осталось доступно через CLI.
+	if err := run([]string{"get", "note-1"}); err != nil {
+		t.Fatalf("get latest value after compact: %v", err)
+	}
+
+	// Удалённый ключ не должен возвращаться после уплотнения.
+	if err := run([]string{"get", "deleted"}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("get deleted key error = %v, want %v", err, storage.ErrNotFound)
 	}
 }

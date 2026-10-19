@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -24,12 +25,14 @@ type storageFile interface {
 	Truncate(int64) error
 	ReadAt([]byte, int64) (int, error)
 	Stat() (os.FileInfo, error)
+	Sync() error
 	Close() error
 }
 
 type Store struct {
 	mu     sync.Mutex
 	file   storageFile
+	path   string
 	index  map[string]Entry
 	closed bool
 	failed bool
@@ -61,9 +64,15 @@ func writeRecord(w recordWriter, offset int64, encoded []byte) error {
 
 	return fmt.Errorf("write record: %w", err)
 }
+
 func Open(path string) (*Store, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve storage path: %w", err)
+	}
+
 	file, err := os.OpenFile(
-		path,
+		absPath,
 		os.O_CREATE|os.O_RDWR|os.O_APPEND,
 		0644,
 	)
@@ -73,11 +82,12 @@ func Open(path string) (*Store, error) {
 
 	store := &Store{
 		file:  file,
+		path:  absPath,
 		index: make(map[string]Entry),
 	}
 
 	if err := store.rebuildIndex(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, fmt.Errorf("rebuild storage index: %w", err)
 	}
 
@@ -94,6 +104,7 @@ func (s *Store) Put(key string, data []byte) error {
 	if s.failed {
 		return ErrStoreFailed
 	}
+
 	encoded, err := Encode(Record{
 		Key:  key,
 		Data: data,
@@ -104,7 +115,8 @@ func (s *Store) Put(key string, data []byte) error {
 
 	offset, err := s.file.Seek(0, os.SEEK_END)
 	if err != nil {
-		return err
+		s.failed = true
+		return fmt.Errorf("seek storage before put: %w", err)
 	}
 
 	if err := writeRecord(s.file, offset, encoded); err != nil {
@@ -113,6 +125,12 @@ func (s *Store) Put(key string, data []byte) error {
 		}
 		return err
 	}
+
+	if err := s.file.Sync(); err != nil {
+		s.failed = true
+		return fmt.Errorf("sync put record: %w", err)
+	}
+
 	s.index[key] = Entry{
 		Offset: offset,
 		Size:   len(encoded),
@@ -146,7 +164,8 @@ func (s *Store) Delete(key string) error {
 
 	offset, err := s.file.Seek(0, os.SEEK_END)
 	if err != nil {
-		return err
+		s.failed = true
+		return fmt.Errorf("seek storage before delete: %w", err)
 	}
 
 	if err := writeRecord(s.file, offset, encoded); err != nil {
@@ -154,6 +173,11 @@ func (s *Store) Delete(key string) error {
 			s.failed = true
 		}
 		return err
+	}
+
+	if err := s.file.Sync(); err != nil {
+		s.failed = true
+		return fmt.Errorf("sync delete record: %w", err)
 	}
 
 	delete(s.index, key)
@@ -188,16 +212,44 @@ func (s *Store) Get(key string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 
+	if entry.Size <= 0 {
+		s.failed = true
+		return nil, fmt.Errorf(
+			"invalid record size for key %q: %w",
+			key,
+			ErrInvalidRecord,
+		)
+	}
+
 	encoded := make([]byte, entry.Size)
 
-	_, err := s.file.ReadAt(encoded, entry.Offset)
+	n, err := s.file.ReadAt(encoded, entry.Offset)
 	if err != nil {
-		return nil, err
+		s.failed = true
+		return nil, fmt.Errorf("read record for key %q: %w", key, err)
+	}
+	if n != len(encoded) {
+		s.failed = true
+		return nil, fmt.Errorf(
+			"read record for key %q: %w",
+			key,
+			errors.New("incomplete record read"),
+		)
 	}
 
 	record, err := Decode(encoded)
 	if err != nil {
-		return nil, err
+		s.failed = true
+		return nil, fmt.Errorf("decode record for key %q: %w", key, err)
+	}
+
+	if record.Type != RecordPut || record.Key != key {
+		s.failed = true
+		return nil, fmt.Errorf(
+			"index points to an unexpected record for key %q: %w",
+			key,
+			ErrInvalidRecord,
+		)
 	}
 
 	return record.Data, nil

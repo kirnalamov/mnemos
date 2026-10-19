@@ -32,3 +32,7 @@ func (e *Engine) Delete(key string) error {
 func (e *Engine) Close() error {
 	return e.store.Close()
 }
+
+func (e *Engine) Compact() error {
+	return e.store.Compact()
+}
