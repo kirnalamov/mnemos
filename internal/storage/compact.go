@@ -9,6 +9,12 @@ import (
 	"sort"
 )
 
+var (
+	createCompactTemp = os.CreateTemp
+	renameCompactFile = os.Rename
+	openCompactFile   = os.OpenFile
+)
+
 func (s *Store) Compact() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -29,7 +35,7 @@ func (s *Store) Compact() error {
 	}
 
 	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".mnemos-compact-*")
+	tmp, err := createCompactTemp(dir, ".mnemos-compact-*")
 	if err != nil {
 		return fmt.Errorf("create temporary storage file: %w", err)
 	}
@@ -130,10 +136,10 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("close original storage: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := renameCompactFile(tmpPath, s.path); err != nil {
 		// Не используем O_CREATE: если исходного файла больше нет,
 		// нельзя подменять его новым пустым файлом.
-		file, reopenErr := os.OpenFile(
+		file, reopenErr := openCompactFile(
 			s.path,
 			os.O_RDWR|os.O_APPEND,
 			info.Mode().Perm(),
@@ -150,7 +156,7 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("replace storage: %w", err)
 	}
 
-	file, err := os.OpenFile(
+	file, err := openCompactFile(
 		s.path,
 		os.O_RDWR|os.O_APPEND,
 		info.Mode().Perm(),

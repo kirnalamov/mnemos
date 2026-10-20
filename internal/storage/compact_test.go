@@ -242,3 +242,116 @@ func TestStoreCompactDoesNotReplaceCorruptedLiveRecord(t *testing.T) {
 		t.Fatal("compaction modified the original file after detecting corruption")
 	}
 }
+
+func TestStoreCompactRenameFailureKeepsOriginalUsable(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	if err := store.Put("key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRename := renameCompactFile
+	renameCompactFile = func(string, string) error {
+		return errors.New("injected rename failure")
+	}
+	t.Cleanup(func() {
+		renameCompactFile = originalRename
+	})
+
+	if err := store.Compact(); err == nil {
+		t.Fatal("expected Compact to fail")
+	}
+
+	got, err := store.Get("key")
+	if err != nil {
+		t.Fatalf("Get after failed Compact: %v", err)
+	}
+	if string(got) != "value" {
+		t.Fatalf("Get after failed Compact = %q, want %q", got, "value")
+	}
+
+	if err := store.Put("another", []byte("record")); err != nil {
+		t.Fatalf("Put after failed Compact: %v", err)
+	}
+}
+
+func TestStoreCompactRenameAndReopenFailureMarksStoreFailed(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	if err := store.Put("key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRename := renameCompactFile
+	originalOpen := openCompactFile
+	t.Cleanup(func() {
+		renameCompactFile = originalRename
+		openCompactFile = originalOpen
+	})
+
+	renameCompactFile = func(string, string) error {
+		return errors.New("injected rename failure")
+	}
+	openCompactFile = func(string, int, os.FileMode) (*os.File, error) {
+		return nil, errors.New("injected reopen failure")
+	}
+
+	if err := store.Compact(); err == nil {
+		t.Fatal("expected Compact to fail")
+	}
+
+	if _, err := store.Get("key"); !errors.Is(err, ErrStoreFailed) {
+		t.Fatalf("Get error = %v, want %v", err, ErrStoreFailed)
+	}
+}
+
+func TestStoreCompactTempFileCreationFailureKeepsStoreUsable(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "data.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	if err := store.Put("key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	originalCreate := createCompactTemp
+	t.Cleanup(func() {
+		createCompactTemp = originalCreate
+	})
+
+	createCompactTemp = func(string, string) (*os.File, error) {
+		return nil, errors.New("injected temp file creation failure")
+	}
+
+	if err := store.Compact(); err == nil {
+		t.Fatal("expected Compact to fail")
+	}
+
+	got, err := store.Get("key")
+	if err != nil {
+		t.Fatalf("Get after failed Compact: %v", err)
+	}
+	if string(got) != "value" {
+		t.Fatalf("Get = %q, want %q", got, "value")
+	}
+
+	if err := store.Put("another", []byte("record")); err != nil {
+		t.Fatalf("Put after failed Compact: %v", err)
+	}
+}
