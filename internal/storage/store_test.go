@@ -778,3 +778,48 @@ func TestStoreReopenAfterDeleteSyncFailure(t *testing.T) {
 		t.Fatalf("Get after reopen: got %v, want %v", err, ErrNotFound)
 	}
 }
+
+func TestStoreOpenIgnoresOrphanedCompactTempFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("key", []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Имитируем временный файл, оставшийся после аварийного завершения.
+	orphan, err := os.Create(filepath.Join(dir, ".mnemos-compact-orphan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orphan.Write([]byte("incomplete temporary data")); err != nil {
+		_ = orphan.Close()
+		t.Fatal(err)
+	}
+	if err := orphan.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open with orphaned temporary file: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.Get("key")
+	if err != nil {
+		t.Fatalf("Get after reopening: %v", err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("Get = %q, want %q", got, "original")
+	}
+}
