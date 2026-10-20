@@ -279,6 +279,15 @@ func (f *failingFile) Truncate(size int64) error {
 	return f.File.Truncate(size)
 }
 
+type syncFailingFile struct {
+	*failingFile
+	syncErr error
+}
+
+func (f *syncFailingFile) Sync() error {
+	return f.syncErr
+}
+
 func TestWriteRecordRollsBackPartialWrite(t *testing.T) {
 	initial := []byte("existing data")
 	w := &failingWriter{
@@ -445,7 +454,7 @@ func TestStoreDeleteDoesNotRemoveNewerValue(t *testing.T) {
 	}
 }
 
-func TestStoreOpenTruncatesIncompleteTailHeader(t *testing.T) {
+func TestStoreOpenRejectsIncompleteTailHeader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.mnemos")
 
 	store, err := Open(path)
@@ -479,29 +488,21 @@ func TestStoreOpenTruncatesIncompleteTailHeader(t *testing.T) {
 	}
 
 	store, err = Open(path)
-	if err != nil {
-		t.Fatalf("Open with incomplete tail: %v", err)
-	}
-	defer store.Close()
-
-	got, err := store.Get("note-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "saved data" {
-		t.Fatalf("Get: got %q, want %q", got, "saved data")
+	if err == nil {
+		store.Close()
+		t.Fatal("expected Open to reject incomplete tail header")
 	}
 
 	info, err = os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != validSize {
-		t.Fatalf("file size: got %d, want %d", info.Size(), validSize)
+	if info.Size() != validSize+3 {
+		t.Fatalf("file size: got %d, want %d", info.Size(), validSize+3)
 	}
 }
 
-func TestStoreOpenTruncatesIncompleteTailRecord(t *testing.T) {
+func TestStoreOpenRejectsIncompleteTailRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.mnemos")
 
 	store, err := Open(path)
@@ -544,28 +545,281 @@ func TestStoreOpenTruncatesIncompleteTailRecord(t *testing.T) {
 	}
 
 	store, err = Open(path)
-	if err != nil {
-		t.Fatalf("Open with incomplete record: %v", err)
-	}
-	defer store.Close()
-
-	got, err := store.Get("note-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "saved data" {
-		t.Fatalf("Get: got %q, want %q", got, "saved data")
-	}
-
-	if _, err := store.Get("note-2"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Get incomplete record: got %v, want %v", err, ErrNotFound)
+	if err == nil {
+		store.Close()
+		t.Fatal("expected Open to reject incomplete record")
 	}
 
 	info, err = os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != validSize {
-		t.Fatalf("file size: got %d, want %d", info.Size(), validSize)
+	wantSize := validSize + int64(len(partial))
+	if info.Size() != wantSize {
+		t.Fatalf("file size: got %d, want %d", info.Size(), wantSize)
+	}
+}
+func TestStoreEntersFailedStateAfterSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("notes/test.txt", []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+
+	oldEntry := store.index["notes/test.txt"]
+
+	syncErr := errors.New("simulated sync failure")
+	file, ok := store.file.(*os.File)
+	if !ok {
+		t.Fatalf("unexpected storage file type: %T", store.file)
+	}
+
+	store.file = &syncFailingFile{
+		failingFile: &failingFile{
+			File:       file,
+			writeLimit: int(^uint(0) >> 1),
+		},
+		syncErr: syncErr,
+	}
+	err = store.Put("notes/test.txt", []byte("updated"))
+	if err == nil {
+		t.Fatal("expected Sync error")
+	}
+
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("Put error: got %v, want Sync error %v", err, syncErr)
+	}
+
+	if !store.failed {
+		t.Fatal("store should enter failed state after Sync failure")
+	}
+
+	if got := store.index["notes/test.txt"]; got != oldEntry {
+		t.Fatal("index entry changed after Sync failure")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Errorf("Close error: %v", err)
+	}
+}
+
+func TestStoreDeleteKeepsIndexAfterSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := "notes/test.txt"
+	if err := store.Put(key, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+
+	oldEntry, ok := store.index[key]
+	if !ok {
+		t.Fatal("expected object to exist in index")
+	}
+
+	file, ok := store.file.(*os.File)
+	if !ok {
+		t.Fatalf("unexpected storage file type: %T", store.file)
+	}
+
+	syncErr := errors.New("simulated sync failure")
+	store.file = &syncFailingFile{
+		failingFile: &failingFile{
+			File:       file,
+			writeLimit: int(^uint(0) >> 1),
+		},
+		syncErr: syncErr,
+	}
+
+	err = store.Delete(key)
+	if err == nil {
+		t.Fatal("expected Sync error")
+	}
+
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("Delete error: got %v, want Sync error %v", err, syncErr)
+	}
+
+	if !store.failed {
+		t.Fatal("store should enter failed state after Sync failure")
+	}
+
+	gotEntry, ok := store.index[key]
+	if !ok {
+		t.Fatal("index entry was removed after Sync failure")
+	}
+
+	if gotEntry != oldEntry {
+		t.Fatalf("index entry changed: got %+v, want %+v", gotEntry, oldEntry)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Errorf("Close error: %v", err)
+	}
+}
+
+func TestStoreReopenAfterPutSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := "notes/test.txt"
+	if err := store.Put(key, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+
+	file, ok := store.file.(*os.File)
+	if !ok {
+		t.Fatalf("unexpected storage file type: %T", store.file)
+	}
+
+	syncErr := errors.New("simulated sync failure")
+	store.file = &syncFailingFile{
+		failingFile: &failingFile{
+			File:       file,
+			writeLimit: int(^uint(0) >> 1),
+		},
+		syncErr: syncErr,
+	}
+
+	err = store.Put(key, []byte("updated"))
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("Put error: got %v, want Sync error %v", err, syncErr)
+	}
+
+	if !store.failed {
+		t.Fatal("store should enter failed state after Sync failure")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen storage: %v", err)
+	}
+	defer recovered.Close()
+
+	got, err := recovered.Get(key)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+
+	if string(got) != "updated" {
+		t.Fatalf("data after reopen: got %q, want %q", got, "updated")
+	}
+}
+
+func TestStoreReopenAfterDeleteSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := "notes/test.txt"
+	if err := store.Put(key, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+
+	file, ok := store.file.(*os.File)
+	if !ok {
+		t.Fatalf("unexpected storage file type: %T", store.file)
+	}
+
+	syncErr := errors.New("simulated sync failure")
+	store.file = &syncFailingFile{
+		failingFile: &failingFile{
+			File:       file,
+			writeLimit: int(^uint(0) >> 1),
+		},
+		syncErr: syncErr,
+	}
+
+	err = store.Delete(key)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("Delete error: got %v, want Sync error %v", err, syncErr)
+	}
+
+	if !store.failed {
+		t.Fatal("store should enter failed state after Sync failure")
+	}
+
+	if _, ok := store.index[key]; !ok {
+		t.Fatal("index entry should remain until storage is reopened")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen storage: %v", err)
+	}
+	defer recovered.Close()
+
+	_, err = recovered.Get(key)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after reopen: got %v, want %v", err, ErrNotFound)
+	}
+}
+
+func TestStoreOpenIgnoresOrphanedCompactTempFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Put("key", []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Имитируем временный файл, оставшийся после аварийного завершения.
+	orphan, err := os.Create(filepath.Join(dir, ".mnemos-compact-orphan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orphan.Write([]byte("incomplete temporary data")); err != nil {
+		_ = orphan.Close()
+		t.Fatal(err)
+	}
+	if err := orphan.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open with orphaned temporary file: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.Get("key")
+	if err != nil {
+		t.Fatalf("Get after reopening: %v", err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("Get = %q, want %q", got, "original")
 	}
 }

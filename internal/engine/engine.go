@@ -2,8 +2,16 @@ package engine
 
 import "github.com/kirnalamov/mnemos/internal/storage"
 
+type objectStore interface {
+	Put(key string, data []byte) error
+	Get(key string) ([]byte, error)
+	Delete(key string) error
+	Close() error
+	Compact() error
+}
+
 type Engine struct {
-	store *storage.Store
+	store objectStore
 }
 
 func Open(path string) (*Engine, error) {
@@ -12,9 +20,7 @@ func Open(path string) (*Engine, error) {
 		return nil, err
 	}
 
-	return &Engine{
-		store: store,
-	}, nil
+	return &Engine{store: store}, nil
 }
 
 func (e *Engine) Put(key string, data []byte) error {
