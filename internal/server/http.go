@@ -15,6 +15,9 @@ type objectEngine interface {
 	Get(key string) ([]byte, error)
 	Delete(key string) error
 }
+type streamingObjectEngine interface {
+	PutReader(key string, r io.Reader, size int64) error
+}
 
 type Handler struct {
 	engine objectEngine
@@ -39,24 +42,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+		defer r.Body.Close()
 
-		data, err := readRequestBody(r)
-		if err != nil {
+		streamingEngine, ok := h.engine.(streamingObjectEngine)
+		if !ok {
+			http.Error(w, "streaming upload is not supported", http.StatusInternalServerError)
+			return
+		}
+
+		size := r.ContentLength
+		if size < 0 {
+			// Content-Length is required by PutReader's exact-size contract.
+			http.Error(w, "Content-Length is required", http.StatusLengthRequired)
+			return
+		}
+		if size > 16<<20 {
+			http.Error(w, "object exceeds maximum size of 16 MiB", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		if err := streamingEngine.PutReader(key, r.Body, size); err != nil {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				http.Error(w, "object exceeds maximum size of 16 MiB", http.StatusRequestEntityTooLarge)
 				return
 			}
 
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
-			return
-		}
-		if err != nil {
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
-			return
-		}
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				http.Error(w, "request body is shorter than Content-Length", http.StatusBadRequest)
+				return
+			}
 
-		if err := h.engine.Put(key, data); err != nil {
 			http.Error(w, "failed to store object", http.StatusInternalServerError)
 			return
 		}

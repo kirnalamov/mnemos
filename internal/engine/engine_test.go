@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -35,7 +36,16 @@ func (f *fakeStore) Close() error {
 func (f *fakeStore) Compact() error {
 	return f.compactFn()
 }
-
+func (f *fakeStore) PutReader(key string, r io.Reader, size int64) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return io.ErrUnexpectedEOF
+	}
+	return f.Put(key, data)
+}
 func TestEnginePutGetDelete(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.mnemos")
 

@@ -54,6 +54,16 @@ func (f *fakeEngine) Delete(key string) error {
 	return nil
 }
 
+func (f *fakeEngine) PutReader(key string, r io.Reader, size int64) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return io.ErrUnexpectedEOF
+	}
+	return f.Put(key, data)
+}
 func TestHandlerPutAndGet(t *testing.T) {
 	engine := newFakeEngine()
 	handler := NewHandler(engine)
@@ -216,6 +226,50 @@ func TestHandlerPutRejectsOversizedObject(t *testing.T) {
 			"status = %d, want %d",
 			response.Code,
 			http.StatusRequestEntityTooLarge,
+		)
+	}
+}
+
+func TestHandlerPutRejectsDeclaredSizeOverStorageLimit(t *testing.T) {
+	handler := NewHandler(newFakeEngine())
+
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/objects/large",
+		bytes.NewReader(nil),
+	)
+	request.ContentLength = (64 << 20) + 1
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.Code,
+			http.StatusRequestEntityTooLarge,
+		)
+	}
+}
+
+func TestHandlerPutRejectsShortBody(t *testing.T) {
+	handler := NewHandler(newFakeEngine())
+
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/objects/short",
+		bytes.NewReader([]byte("abc")),
+	)
+	request.ContentLength = 5
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.Code,
+			http.StatusBadRequest,
 		)
 	}
 }

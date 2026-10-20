@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -134,6 +136,163 @@ func (s *Store) Put(key string, data []byte) error {
 	s.index[key] = Entry{
 		Offset: offset,
 		Size:   len(encoded),
+	}
+
+	return nil
+}
+
+func (s *Store) writeStreamRecord(
+	offset int64,
+	header []byte,
+	key []byte,
+	data *os.File,
+	size int64,
+) error {
+	rollback := func(cause error) error {
+		if err := s.file.Truncate(offset); err != nil {
+			return errors.Join(
+				ErrRollbackFailed,
+				cause,
+				fmt.Errorf("rollback incomplete write: %w", err),
+			)
+		}
+		return cause
+	}
+
+	writePart := func(p []byte) error {
+		for len(p) > 0 {
+			n, err := s.file.Write(p)
+			if n > 0 {
+				p = p[n:]
+			}
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return io.ErrShortWrite
+			}
+		}
+		return nil
+	}
+
+	if err := writePart(header); err != nil {
+		return rollback(fmt.Errorf("write record header: %w", err))
+	}
+	if err := writePart(key); err != nil {
+		return rollback(fmt.Errorf("write record key: %w", err))
+	}
+
+	n, err := io.CopyN(s.file, data, size)
+	if err != nil {
+		return rollback(fmt.Errorf("write record data: %w", err))
+	}
+	if n != size {
+		return rollback(io.ErrUnexpectedEOF)
+	}
+
+	return nil
+}
+
+// PutReader stores exactly size bytes read from r without buffering
+// the entire object in memory.
+func (s *Store) PutReader(key string, r io.Reader, size int64) error {
+	if r == nil {
+		return errors.New("nil reader")
+	}
+	if size < 0 || uint64(size) > maxDataSize {
+		return ErrInvalidRecord
+	}
+	if len(key) == 0 || len(key) > maxKeySize {
+		return ErrInvalidRecord
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrStoreClosed
+	}
+	if s.failed {
+		return ErrStoreFailed
+	}
+
+	tmp, err := os.CreateTemp("", "mnemos-put-*")
+	if err != nil {
+		return fmt.Errorf("create temporary object: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	// Build the V3 header prefix used by the checksum.
+	header := make([]byte, headerSizeV3)
+	binary.BigEndian.PutUint32(header[0:4], magic)
+	binary.BigEndian.PutUint16(header[4:6], versionV3)
+	header[6] = byte(RecordPut)
+	binary.BigEndian.PutUint32(header[7:11], uint32(len(key)))
+	binary.BigEndian.PutUint64(header[11:19], uint64(size))
+
+	hash := crc32.NewIEEE()
+	_, _ = hash.Write(header[6:19])
+	_, _ = io.WriteString(hash, key)
+
+	n, err := io.CopyN(io.MultiWriter(tmp, hash), r, size)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("read object body: %w", io.ErrUnexpectedEOF)
+		}
+		return fmt.Errorf("read object body: %w", err)
+	}
+	if n != size {
+		return io.ErrUnexpectedEOF
+	}
+	// Reject readers that contain more data than the declared size.
+	var extra [1]byte
+	extraN, extraErr := io.ReadFull(r, extra[:])
+	if extraN != 0 {
+		return errors.New("object body exceeds declared size")
+	}
+	if extraErr != io.EOF {
+		if extraErr == nil {
+			return errors.New("object body exceeds declared size")
+		}
+		return fmt.Errorf("verify object body size: %w", extraErr)
+	}
+
+	binary.BigEndian.PutUint32(header[19:23], hash.Sum32())
+
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary object: %w", err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind temporary object: %w", err)
+	}
+
+	offset, err := s.file.Seek(0, io.SeekEnd)
+	if err != nil {
+		s.failed = true
+		return fmt.Errorf("seek storage before put: %w", err)
+	}
+
+	// All bytes are appended under the store lock. Any write failure
+	// triggers rollback to the original file size.
+	if err := s.writeStreamRecord(offset, header, []byte(key), tmp, size); err != nil {
+		if errors.Is(err, ErrRollbackFailed) {
+			s.failed = true
+		}
+		return err
+	}
+
+	if err := s.file.Sync(); err != nil {
+		s.failed = true
+		return fmt.Errorf("sync put record: %w", err)
+	}
+
+	s.index[key] = Entry{
+		Offset: offset,
+		Size:   headerSizeV3 + len(key) + int(size),
 	}
 
 	return nil

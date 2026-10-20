@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -821,5 +823,142 @@ func TestStoreOpenIgnoresOrphanedCompactTempFile(t *testing.T) {
 	}
 	if string(got) != "original" {
 		t.Fatalf("Get = %q, want %q", got, "original")
+	}
+}
+
+func TestStorePutReaderAndReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := "stream.bin"
+	data := bytes.Repeat([]byte("stream-data-"), 1024)
+
+	if err := store.PutReader(key, bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatalf("PutReader: %v", err)
+	}
+
+	got, err := store.Get(key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("stored data does not match input")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store.Close()
+
+	got, err = store.Get(key)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("data after reopen does not match input")
+	}
+}
+
+func TestStorePutReaderRejectsWrongSize(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "data.mnemos"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	tests := []struct {
+		name string
+		data string
+		size int64
+	}{
+		{name: "reader shorter than size", data: "abc", size: 4},
+		{name: "reader longer than size", data: "abcd", size: 3},
+		{name: "negative size", data: "", size: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.PutReader("key-"+tt.name, strings.NewReader(tt.data), tt.size)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestStorePutReaderEmptyObject(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "data.mnemos"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if err := store.PutReader("empty", bytes.NewReader(nil), 0); err != nil {
+		t.Fatalf("PutReader empty object: %v", err)
+	}
+
+	got, err := store.Get("empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d bytes, want 0", len(got))
+	}
+}
+
+func TestStorePutReaderRollsBackPartialWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	file, err := os.OpenFile(
+		path,
+		os.O_CREATE|os.O_RDWR|os.O_APPEND,
+		0644,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initial := []byte("existing data")
+	if _, err := file.Write(initial); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+
+	store := &Store{
+		file: &failingFile{
+			File:       file,
+			writeLimit: 3,
+			writeErr:   errors.New("simulated write failure"),
+		},
+		index: make(map[string]Entry),
+	}
+	defer store.Close()
+
+	err = store.PutReader("stream.bin", strings.NewReader("payload"), 7)
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+	if errors.Is(err, ErrRollbackFailed) {
+		t.Fatalf("unexpected rollback failure: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, initial) {
+		t.Fatalf("file after rollback = %q, want %q", got, initial)
+	}
+
+	if _, ok := store.index["stream.bin"]; ok {
+		t.Fatal("index must not contain the failed object")
 	}
 }
