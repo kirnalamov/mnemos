@@ -1,5 +1,13 @@
 # Mnemos
+<p align="center">
+  <img src="logo.png" alt="Mnemos logo" width="320">
+</p>
 
+<h1 align="center">Mnemos</h1>
+
+<p align="center">
+  A simple append-only object store written in Go.
+</p>
 **A file-based object storage engine written in Go.**\
 **Файловое объектное хранилище, реализованное на Go.**
 
