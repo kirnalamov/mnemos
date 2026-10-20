@@ -8,6 +8,7 @@
 <p align="center">
   A simple append-only object store written in Go.
 </p>
+
 **A file-based object storage engine written in Go.**\
 **Файловое объектное хранилище, реализованное на Go.**
 
