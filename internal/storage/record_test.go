@@ -39,6 +39,43 @@ func TestEncodeDecode(t *testing.T) {
 	}
 }
 
+func TestEncodeRejectsInvalidRecords(t *testing.T) {
+	tests := []struct {
+		name   string
+		record Record
+	}{
+		{
+			name:   "empty key",
+			record: Record{Type: RecordPut, Key: "", Data: []byte("data")},
+		},
+		{
+			name:   "oversized key",
+			record: Record{Type: RecordPut, Key: string(bytes.Repeat([]byte("k"), maxKeySize+1))},
+		},
+		{
+			name:   "oversized data",
+			record: Record{Type: RecordPut, Key: "test", Data: make([]byte, int(maxDataSize)+1)},
+		},
+		{
+			name:   "unknown record type",
+			record: Record{Type: RecordType(99), Key: "test"},
+		},
+		{
+			name:   "delete with data",
+			record: Record{Type: RecordDelete, Key: "test", Data: []byte("data")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Encode(tt.record)
+			if !errors.Is(err, ErrInvalidRecord) {
+				t.Fatalf("Encode error: got %v, want ErrInvalidRecord", err)
+			}
+		})
+	}
+}
+
 func TestDecodeDetectsCorruption(t *testing.T) {
 	encoded, err := Encode(Record{
 		Key:  "test",

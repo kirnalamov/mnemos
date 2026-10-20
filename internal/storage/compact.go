@@ -10,10 +10,23 @@ import (
 )
 
 var (
-	createCompactTemp = os.CreateTemp
-	renameCompactFile = os.Rename
-	openCompactFile   = os.OpenFile
+	createCompactTemp    = os.CreateTemp
+	renameCompactFile    = os.Rename
+	openCompactFile      = os.OpenFile
+	syncCompactDirectory = syncDirectory
 )
+
+func syncDirectory(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	return errors.Join(syncErr, closeErr)
+}
 
 func (s *Store) Compact() error {
 	s.mu.Lock()
@@ -155,7 +168,10 @@ func (s *Store) Compact() error {
 		s.file = file
 		return fmt.Errorf("replace storage: %w", err)
 	}
-
+	if err := syncCompactDirectory(dir); err != nil {
+		s.failed = true
+		return fmt.Errorf("sync storage directory: %w", err)
+	}
 	file, err := openCompactFile(
 		s.path,
 		os.O_RDWR|os.O_APPEND,

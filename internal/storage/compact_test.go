@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -353,5 +354,128 @@ func TestStoreCompactTempFileCreationFailureKeepsStoreUsable(t *testing.T) {
 
 	if err := store.Put("another", []byte("record")); err != nil {
 		t.Fatalf("Put after failed Compact: %v", err)
+	}
+}
+
+func TestStoreCompactReopenFailureAfterRenameMarksStoreFailed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.db")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	if err := store.Put("key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	originalOpen := openCompactFile
+	t.Cleanup(func() {
+		openCompactFile = originalOpen
+	})
+
+	openCompactFile = func(string, int, os.FileMode) (*os.File, error) {
+		return nil, errors.New("injected reopen failure")
+	}
+
+	err = store.Compact()
+	if err == nil {
+		t.Fatal("expected Compact to fail")
+	}
+
+	if !strings.Contains(err.Error(), "reopen compacted storage") {
+		t.Fatalf("Compact error = %v, want reopen failure", err)
+	}
+
+	if _, err := store.Get("key"); !errors.Is(err, ErrStoreFailed) {
+		t.Fatalf("Get error = %v, want %v", err, ErrStoreFailed)
+	}
+
+	if err := store.Put("another", []byte("record")); !errors.Is(err, ErrStoreFailed) {
+		t.Fatalf("Put error = %v, want %v", err, ErrStoreFailed)
+	}
+
+	// Проверяем, что Rename уже заменил исходный файл.
+	// Несмотря на ошибку повторного открытия, файл должен существовать.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat compacted file: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("compacted path is not a regular file: %v", info.Mode())
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after failed Compact: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = reopened.Close()
+	})
+
+	got, err := reopened.Get("key")
+	if err != nil {
+		t.Fatalf("Get after reopening: %v", err)
+	}
+	if string(got) != "value" {
+		t.Fatalf("Get = %q, want %q", got, "value")
+	}
+}
+
+func TestStoreCompactDirectorySyncFailureMarksStoreFailed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.mnemos")
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	if err := store.Put("key", []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	originalSync := syncCompactDirectory
+	t.Cleanup(func() {
+		syncCompactDirectory = originalSync
+	})
+
+	syncCompactDirectory = func(string) error {
+		return errors.New("injected directory sync failure")
+	}
+
+	err = store.Compact()
+	if err == nil {
+		t.Fatal("expected Compact to fail")
+	}
+	if !strings.Contains(err.Error(), "sync storage directory") {
+		t.Fatalf("Compact error = %v, want directory sync failure", err)
+	}
+
+	if _, err := store.Get("key"); !errors.Is(err, ErrStoreFailed) {
+		t.Fatalf("Get error = %v, want %v", err, ErrStoreFailed)
+	}
+
+	// Rename уже произошёл: проверяем, что компактный файл
+	// можно открыть заново и прочитать из него данные.
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after directory sync failure: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = reopened.Close()
+	})
+
+	got, err := reopened.Get("key")
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if string(got) != "value" {
+		t.Fatalf("Get = %q, want %q", got, "value")
 	}
 }
