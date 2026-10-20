@@ -130,6 +130,52 @@ func TestHTTPIntegrationPersistsObjectAfterReopen(t *testing.T) {
 	}
 }
 
+func TestHTTPIntegrationRejectsShortBody(t *testing.T) {
+	dataPath := filepath.Join(t.TempDir(), "data.mnemos")
+
+	e, err := engine.Open(dataPath)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer func() {
+		if err := e.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	}()
+
+	handler := NewHandler(e)
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/objects/short",
+		bytes.NewReader([]byte("abc")),
+	)
+	request.ContentLength = 5
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"PUT status = %d, want %d; body = %q",
+			response.Code,
+			http.StatusBadRequest,
+			response.Body.String(),
+		)
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, "/objects/short", nil)
+	getResponse := httptest.NewRecorder()
+	handler.ServeHTTP(getResponse, getRequest)
+
+	if getResponse.Code != http.StatusNotFound {
+		t.Fatalf(
+			"GET status = %d, want %d",
+			getResponse.Code,
+			http.StatusNotFound,
+		)
+	}
+}
+
 func doRequest(t *testing.T, client *http.Client, method, url string, body []byte) *http.Response {
 	t.Helper()
 

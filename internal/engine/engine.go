@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/kirnalamov/mnemos/internal/storage"
+import (
+	"io"
+
+	"github.com/kirnalamov/mnemos/internal/storage"
+)
 
 type objectStore interface {
 	Put(key string, data []byte) error
@@ -8,6 +12,7 @@ type objectStore interface {
 	Delete(key string) error
 	Close() error
 	Compact() error
+	PutReader(key string, r io.Reader, size int64) error
 }
 
 type Engine struct {
@@ -41,4 +46,8 @@ func (e *Engine) Close() error {
 
 func (e *Engine) Compact() error {
 	return e.store.Compact()
+}
+
+func (e *Engine) PutReader(key string, r io.Reader, size int64) error {
+	return e.store.PutReader(key, r, size)
 }
